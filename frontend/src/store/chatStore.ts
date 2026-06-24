@@ -17,6 +17,7 @@ interface ChatState {
   setFollowUps: (id: string, questions: string[]) => void
   setConfidence: (id: string, confidence: number) => void
   setConversational: (id: string) => void
+  setAnswer: (id: string, text: string) => void
   finalizeMessage: (id: string, latency?: number) => void
   setError: (id: string, msg: string) => void
   setStreaming: (v: boolean) => void
@@ -111,6 +112,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setConversational: (id) => {
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, isConversational: true } : m)),
+    }))
+  },
+
+  setAnswer: (id, text) => {
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, content: text } : m)),
     }))
   },
 

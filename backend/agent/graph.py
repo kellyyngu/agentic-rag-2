@@ -88,7 +88,7 @@ async def run_agent(
     conversation_history: list,
     retriever_service: Any,
 ) -> AsyncGenerator[dict, None]:
-    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=0)  # 0 = unlimited
 
     initial_state: AgentState = {
         "query": query,

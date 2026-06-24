@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import asyncio
 from typing import Any
@@ -91,13 +92,10 @@ async def run(state: AgentState) -> AgentState:
         )
         for chunk in response:
             if chunk.text:
-                for char in chunk.text:
-                    full_text += char
-                    if q_stream:
-                        try:
-                            q_stream.put_nowait({"event": "token", "data": {"text": char}})
-                        except asyncio.QueueFull:
-                            pass
+                full_text += chunk.text
+                if q_stream:
+                    # Stream whole chunk — avoids queue overflow from char-by-char
+                    await q_stream.put({"event": "token", "data": {"text": chunk.text}})
     except Exception as e:
         logger.error(f"[generator] streaming failed: {e}")
         full_text = f"I encountered an error generating the response: {e}"
@@ -111,11 +109,12 @@ async def run(state: AgentState) -> AgentState:
     chunks = state.get("retrieved_chunks", [])
     chunk_map = {str(i + 1): chunk for i, chunk in enumerate(chunks)}
 
-    json_start = full_text.rfind("\n{")
-    if json_start != -1:
+    # Extract the trailing JSON block — match the last {...} that spans multiple lines
+    _json_re = re.search(r'\n(\{[\s\S]*\})\s*$', full_text)
+    if _json_re:
         try:
-            meta = json.loads(full_text[json_start:].strip())
-            answer = full_text[:json_start].strip()
+            meta = json.loads(_json_re.group(1))
+            answer = full_text[:_json_re.start()].strip()
             for c in meta.get("citations", []):
                 cid = str(c.get("id", ""))
                 chunk = chunk_map.get(cid)
@@ -148,6 +147,12 @@ async def run(state: AgentState) -> AgentState:
     }
 
     if q_stream:
+        # Send the clean answer (JSON block stripped) so the frontend replaces
+        # the raw streamed content which may include the trailing JSON metadata.
+        await q_stream.put({
+            "event": "answer",
+            "data": {"text": answer},
+        })
         await q_stream.put({
             "event": "citations",
             "data": {"citations": [c.to_dict() for c in citations]},

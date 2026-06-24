@@ -74,6 +74,9 @@ export function useChat() {
             case 'conversational':
               store.setConversational(assistantId)
               break
+            case 'answer':
+              store.setAnswer(assistantId, (data.text as string) || '')
+              break
             case 'plan':
               store.setPlan(assistantId, data as unknown as AgentPlan)
               break

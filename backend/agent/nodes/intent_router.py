@@ -120,11 +120,7 @@ async def _handle_conversational(state: AgentState) -> None:
             if chunk.text:
                 full_text += chunk.text
                 if q_stream:
-                    for char in chunk.text:
-                        try:
-                            q_stream.put_nowait({"event": "token", "data": {"text": char}})
-                        except Exception:
-                            pass
+                    await q_stream.put({"event": "token", "data": {"text": chunk.text}})
     except Exception as e:
         logger.error(f"[router] conversational generation failed: {e}")
         full_text = "Hi there! How can I help you?"
