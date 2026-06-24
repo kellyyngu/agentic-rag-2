@@ -19,7 +19,8 @@ RULES:
 2. Cite sources inline using [1], [2], etc. — every factual claim must have a citation.
 3. If partial information is available, provide what you know and indicate gaps.
 4. Be concise but complete. Use markdown for structure when appropriate.
-5. End with a JSON block (after your answer) containing citations and follow-up questions."""
+5. After your answer, output a metadata block that starts with the exact line: <<<JSON
+   Then the raw JSON object (no code fences, no backticks), then: >>>"""
 
 GENERATOR_PROMPT = """CONTEXT:
 {context}
@@ -34,14 +35,39 @@ USER QUERY: {query}
 
 Instructions:
 - Write a comprehensive, grounded answer with inline citations [1], [2], etc.
-- After the answer, on a new line write ONLY valid JSON:
-{{
-  "citations": [
-    {{"id": "1", "source": "filename.pdf", "page": 3, "excerpt": "relevant quote..."}}
-  ],
-  "follow_up_questions": ["question 1?", "question 2?", "question 3?"],
-  "confidence_score": 0.85
-}}"""
+- After your answer output EXACTLY this block (no backticks, no markdown fences):
+<<<JSON
+{{"citations":[{{"id":"1","source":"filename.pdf","page":1,"excerpt":"quote"}}],"follow_up_questions":["q1?","q2?","q3?"],"confidence_score":0.85}}
+>>>"""
+
+
+def _extract_meta(text: str) -> tuple[dict | None, int]:
+    """Return (parsed_meta_dict, split_position) or (None, -1)."""
+    # 1. Custom delimiter <<<JSON ... >>>
+    m = re.search(r'<<<JSON\s*\n?([\s\S]*?)>>>', text)
+    if m:
+        try:
+            return json.loads(m.group(1).strip()), m.start()
+        except Exception:
+            pass
+
+    # 2. Markdown fenced ```json ... ``` or ``` ... ```
+    m = re.search(r'```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n?```\s*$', text, re.IGNORECASE)
+    if m:
+        try:
+            return json.loads(m.group(1).strip()), m.start()
+        except Exception:
+            pass
+
+    # 3. Raw trailing JSON object
+    m = re.search(r'\n(\{[\s\S]*\})\s*$', text)
+    if m:
+        try:
+            return json.loads(m.group(1).strip()), m.start()
+        except Exception:
+            pass
+
+    return None, -1
 
 
 def _build_context(chunks: list[RetrievedChunk]) -> str:
@@ -109,12 +135,11 @@ async def run(state: AgentState) -> AgentState:
     chunks = state.get("retrieved_chunks", [])
     chunk_map = {str(i + 1): chunk for i, chunk in enumerate(chunks)}
 
-    # Extract the trailing JSON block — match the last {...} that spans multiple lines
-    _json_re = re.search(r'\n(\{[\s\S]*\})\s*$', full_text)
-    if _json_re:
+    # Extract metadata block — try custom delimiter first, then fenced, then raw JSON
+    meta, split_pos = _extract_meta(full_text)
+    if meta is not None:
         try:
-            meta = json.loads(_json_re.group(1))
-            answer = full_text[:_json_re.start()].strip()
+            answer = full_text[:split_pos].strip()
             for c in meta.get("citations", []):
                 cid = str(c.get("id", ""))
                 chunk = chunk_map.get(cid)

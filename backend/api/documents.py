@@ -79,6 +79,13 @@ async def ingest_text(request: Request, body: IngestTextRequest):
     return IngestResponse(chunks_added=len(chunks), source=body.source)
 
 
+@router.get("/documents/list")
+async def list_documents(request: Request):
+    vector_store = request.app.state.vector_store
+    sources = await vector_store.list_sources()
+    return {"documents": sources}
+
+
 @router.get("/documents/stats")
 async def document_stats(request: Request):
     vector_store = request.app.state.vector_store

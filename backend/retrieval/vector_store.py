@@ -95,6 +95,35 @@ class VectorStore:
         info = self.client.get_collection(self.collection)
         return info.points_count or 0
 
+    async def list_sources(self) -> list[dict]:
+        """Return unique documents: [{source, chunk_count, pages}]."""
+        if not self.client:
+            return []
+        seen: dict[str, dict] = {}
+        offset = None
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.collection,
+                with_payload=True,
+                limit=100,
+                offset=offset,
+            )
+            for r in results:
+                src = r.payload.get("source", "unknown")
+                if src not in seen:
+                    seen[src] = {"source": src, "chunk_count": 0, "pages": set()}
+                seen[src]["chunk_count"] += 1
+                page = r.payload.get("page")
+                if page:
+                    seen[src]["pages"].add(page)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return [
+            {"source": v["source"], "chunk_count": v["chunk_count"], "page_count": len(v["pages"])}
+            for v in seen.values()
+        ]
+
     async def delete_collection(self):
         if self.client:
             self.client.delete_collection(self.collection)
