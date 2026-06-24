@@ -1,0 +1,37 @@
+[
+  {
+    "id": "eval_001",
+    "query": "What is retrieval-augmented generation (RAG)?",
+    "expected_answer": "RAG is a technique that combines information retrieval with language model generation. It retrieves relevant documents from a knowledge base and uses them as context to generate grounded, factual responses.",
+    "ground_truth_sources": [],
+    "category": "conceptual"
+  },
+  {
+    "id": "eval_002",
+    "query": "How does BM25 differ from dense vector search?",
+    "expected_answer": "BM25 is a sparse retrieval method based on term frequency and inverse document frequency. Dense vector search uses embeddings to capture semantic similarity. BM25 excels at keyword matching while dense search handles synonyms and paraphrases better.",
+    "ground_truth_sources": [],
+    "category": "technical"
+  },
+  {
+    "id": "eval_003",
+    "query": "What is Reciprocal Rank Fusion and why is it used?",
+    "expected_answer": "RRF is a rank aggregation algorithm that combines multiple ranked lists by summing reciprocal ranks with a constant k. It is used in hybrid retrieval to merge BM25 and vector search results without requiring score normalization.",
+    "ground_truth_sources": [],
+    "category": "technical"
+  },
+  {
+    "id": "eval_004",
+    "query": "What is the purpose of CrossEncoder reranking in a RAG pipeline?",
+    "expected_answer": "CrossEncoder reranking scores query-document pairs jointly, considering their interaction. It is more accurate than bi-encoder similarity but slower. In RAG, it is applied as a second-stage reranker to improve the quality of the top-k retrieved chunks.",
+    "ground_truth_sources": [],
+    "category": "technical"
+  },
+  {
+    "id": "eval_005",
+    "query": "What makes an agentic RAG system different from a standard RAG pipeline?",
+    "expected_answer": "An agentic RAG system uses an agent loop with planning, tool use, and reflection. It can decompose queries into sub-questions, decide when to use web search as a fallback, evaluate its own answers, and iteratively refine retrieval based on confidence.",
+    "ground_truth_sources": [],
+    "category": "conceptual"
+  }
+]
