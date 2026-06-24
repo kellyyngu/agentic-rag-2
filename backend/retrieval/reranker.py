@@ -1,9 +1,15 @@
+import math
 from typing import List
 from loguru import logger
 from sentence_transformers import CrossEncoder
 
 from agent.state import RetrievedChunk
 from config import settings
+
+
+def _sigmoid(x: float) -> float:
+    """Normalize a raw cross-encoder logit to [0, 1]."""
+    return 1.0 / (1.0 + math.exp(-x))
 
 
 class Reranker:
@@ -22,17 +28,17 @@ class Reranker:
             return []
 
         pairs = [(query, chunk.content) for chunk in chunks]
-        scores = self.model.predict(pairs)
+        raw_scores = self.model.predict(pairs)
 
         scored = sorted(
-            zip(chunks, scores),
+            zip(chunks, raw_scores),
             key=lambda x: x[1],
             reverse=True,
         )
 
         results = []
-        for chunk, score in scored[:top_k]:
-            chunk.score = float(score)
+        for chunk, raw in scored[:top_k]:
+            chunk.score = _sigmoid(float(raw))
             results.append(chunk)
 
         return results

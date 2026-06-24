@@ -9,9 +9,16 @@ interface Props {
   onFollowUp: (q: string) => void
 }
 
+function relevanceLabel(score: number): { label: string; color: string } {
+  if (score >= 0.6)  return { label: 'High',   color: 'rgb(var(--accent-green))' }
+  if (score >= 0.35) return { label: 'Medium', color: 'rgb(var(--brand))' }
+  return                     { label: 'Low',   color: 'rgb(var(--accent-amber))' }
+}
+
 function SourceCard({ citation }: { citation: Citation }) {
   const [expanded, setExpanded] = useState(false)
-  const confidence = Math.round(citation.relevance_score * 100)
+  const barWidth = Math.max(Math.round(citation.relevance_score * 100), 10)
+  const { label, color } = relevanceLabel(citation.relevance_score)
   const preview = citation.excerpt.slice(0, 180)
   const hasMore = citation.excerpt.length > 180
 
@@ -40,18 +47,15 @@ function SourceCard({ citation }: { citation: Citation }) {
               </span>
             )}
           </div>
-          {/* Confidence bar */}
+          {/* Relevance bar */}
           <div className="flex items-center gap-1.5 mt-1">
             <div className="flex-1 h-0.5 rounded-full overflow-hidden" style={{ backgroundColor: 'rgb(var(--border))' }}>
               <div
                 className="h-full rounded-full"
-                style={{
-                  width: `${confidence}%`,
-                  backgroundColor: confidence > 80 ? 'rgb(var(--accent-green))' : confidence > 60 ? 'rgb(var(--brand))' : 'rgb(var(--accent-amber))',
-                }}
+                style={{ width: `${barWidth}%`, backgroundColor: color }}
               />
             </div>
-            <span className="text-xs flex-shrink-0" style={{ color: 'rgb(var(--text-muted))' }}>{confidence}%</span>
+            <span className="text-xs flex-shrink-0" style={{ color }}>{label}</span>
           </div>
         </div>
       </div>
@@ -193,9 +197,10 @@ export function MessageBubble({ message, onFollowUp }: Props) {
       <div className="flex-1 min-w-0">
         <AgentTrace
           plan={message.plan}
+          agentActions={message.agentActions}
           sourcesCount={message.sources_count ?? message.citations.length}
           confidence={message.confidence}
-          isConversational={message.isConversational}
+          hideRagUI={message.hideRagUI}
           status={message.status}
         />
 
@@ -219,7 +224,7 @@ export function MessageBubble({ message, onFollowUp }: Props) {
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {message.content + (isStreaming ? '▋' : '')}
                 </ReactMarkdown>
-                {!isStreaming && !message.isConversational && (
+                {!isStreaming && !message.hideRagUI && (
                   <>
                     <InlineSources citations={message.citations} />
                     <FollowUpSuggestions questions={message.follow_up_questions} onSelect={onFollowUp} />

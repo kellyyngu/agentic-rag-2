@@ -41,17 +41,19 @@ class HybridRetriever:
         for chunk_id, content, source, page, score in bm25_results:
             self._chunk_cache[chunk_id] = (content, source, page)
 
-        # 2. Vector retrieval
+        # 2. Vector retrieval — preserve cosine similarity scores for display
         vector_results = await self.vector_store.search(query, top_k=settings.vector_top_k)
         vector_ranked = [(chunk_id, score) for chunk_id, _, _, _, score in vector_results]
+        vector_score_map: Dict[str, float] = {}
         for chunk_id, content, source, page, score in vector_results:
             self._chunk_cache[chunk_id] = (content, source, page)
+            vector_score_map[chunk_id] = float(score)
 
         # 3. RRF fusion
         fused_scores = _reciprocal_rank_fusion(bm25_ranked, vector_ranked)
         fused_sorted = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # 4. Build candidates for reranking
+        # 4. Build candidates for reranking — attach vector_score so it survives reranking
         candidates: List[RetrievedChunk] = []
         for chunk_id, rrf_score in fused_sorted[: settings.rerank_top_k]:
             content, source, page = self._chunk_cache.get(chunk_id, ("", None, None))
@@ -62,6 +64,7 @@ class HybridRetriever:
                     source=source or "unknown",
                     page=page,
                     score=rrf_score,
+                    vector_score=vector_score_map.get(chunk_id, 0.0),
                 ))
 
         if not candidates:

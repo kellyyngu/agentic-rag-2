@@ -10,9 +10,16 @@ function DocIcon() {
   )
 }
 
+function relevanceLabel(score: number): { label: string; color: string } {
+  if (score >= 0.6)  return { label: 'High relevance',   color: 'rgb(var(--accent-green))' }
+  if (score >= 0.35) return { label: 'Medium relevance', color: 'rgb(var(--brand))' }
+  return                     { label: 'Low relevance',   color: 'rgb(var(--accent-amber))' }
+}
+
 function CitationCard({ citation }: { citation: Citation }) {
   const [expanded, setExpanded] = useState(false)
-  const confidence = Math.round(citation.relevance_score * 100)
+  const barWidth = Math.max(Math.round(citation.relevance_score * 100), 10)
+  const { label, color } = relevanceLabel(citation.relevance_score)
   const preview = citation.excerpt.slice(0, 160)
   const hasMore = citation.excerpt.length > 160
 
@@ -51,25 +58,16 @@ function CitationCard({ citation }: { citation: Citation }) {
             )}
           </div>
 
-          {/* Confidence bar */}
+          {/* Relevance bar */}
           <div className="flex items-center gap-2 mt-2">
             <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'rgb(var(--border))' }}>
               <div
                 className="h-full rounded-full"
-                style={{
-                  width: `${confidence}%`,
-                  backgroundColor:
-                    confidence > 80
-                      ? 'rgb(var(--accent-green))'
-                      : confidence > 60
-                      ? 'rgb(var(--brand))'
-                      : 'rgb(var(--accent-amber))',
-                  transition: 'width 0.4s ease',
-                }}
+                style={{ width: `${barWidth}%`, backgroundColor: color, transition: 'width 0.4s ease' }}
               />
             </div>
-            <span className="text-xs font-medium flex-shrink-0" style={{ color: 'rgb(var(--text-muted))' }}>
-              {confidence}%
+            <span className="text-xs font-medium flex-shrink-0" style={{ color }}>
+              {label}
             </span>
           </div>
         </div>
@@ -107,17 +105,12 @@ function CitationCard({ citation }: { citation: Citation }) {
 export function CitationPanel() {
   const { messages, citationPanelOpen, setCitationPanelOpen } = useChatStore()
 
-  const allCitations: Citation[] = []
-  const seen = new Set<string>()
-  for (const msg of messages) {
-    for (const c of msg.citations) {
-      const key = `${c.id}-${c.source}`
-      if (!seen.has(key)) {
-        allCitations.push(c)
-        seen.add(key)
-      }
-    }
-  }
+  // Show citations from the most recent completed assistant message.
+  // Citations are globally unique per-chunk — same chunk always gets the same ID.
+  const latestMessage = [...messages]
+    .reverse()
+    .find((m) => m.role === 'assistant' && m.status === 'complete' && !m.hideRagUI)
+  const allCitations: Citation[] = latestMessage?.citations ?? []
 
   if (!citationPanelOpen) return null
 

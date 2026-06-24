@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from google import genai
 from google.genai import types
@@ -6,6 +7,41 @@ from loguru import logger
 
 from config import settings
 from agent.state import AgentState
+
+
+def _sanitize_json(s: str) -> str:
+    """Escape raw newlines/tabs inside JSON string values (same fix as generator.py)."""
+    result = []
+    in_string = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == '\\' and in_string:
+            result.append(c)
+            if i + 1 < len(s):
+                result.append(s[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if c == '"':
+            in_string = not in_string
+            result.append(c)
+            i += 1
+            continue
+        if in_string:
+            if c == '\n':
+                result.append('\\n')
+            elif c == '\r':
+                result.append('\\r')
+            elif c == '\t':
+                result.append('\\t')
+            else:
+                result.append(c)
+        else:
+            result.append(c)
+        i += 1
+    return ''.join(result)
 
 _client = genai.Client(api_key=settings.gemini_api_key)
 
@@ -52,7 +88,7 @@ async def run(state: AgentState) -> AgentState:
                 "event": "reflection",
                 "data": {
                     "passed": True,
-                    "confidence": state.get("confidence_score", 0),
+                    "confidence": max(0.0, min(1.0, state.get("confidence_score", 0))),
                     "iteration": iteration,
                 },
             })
@@ -72,12 +108,24 @@ async def run(state: AgentState) -> AgentState:
             contents=prompt,
             config=types.GenerateContentConfig(max_output_tokens=512),
         )
-        raw = response.text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        result = json.loads(raw.strip())
+        raw = (response.text or "").strip()
+
+        # Empty response from Gemini — treat as pass
+        if not raw:
+            raise ValueError("empty response from LLM")
+
+        # Tier 1: markdown fenced block
+        m = re.search(r'```(?:json)?\s*\n?(\{[\s\S]*?\})\s*\n?```', raw)
+        if m:
+            raw = m.group(1)
+
+        # Tier 2: first JSON object in the response
+        if not raw.startswith('{'):
+            m = re.search(r'\{[\s\S]*\}', raw)
+            if m:
+                raw = m.group(0)
+
+        result = json.loads(_sanitize_json(raw.strip()))
     except Exception as e:
         logger.warning(f"[reflector] LLM failed: {e}, defaulting to passed=True")
 

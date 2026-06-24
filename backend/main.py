@@ -10,6 +10,7 @@ from retrieval.vector_store import VectorStore
 from retrieval.bm25_index import BM25Index
 from retrieval.hybrid_retriever import HybridRetriever
 from retrieval.reranker import Reranker
+from agent.citation_manager import CitationManager
 
 
 logger.remove()
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
         bm25_index=app.state.bm25_index,
         reranker=app.state.reranker,
     )
+    app.state.citation_manager = CitationManager()
     logger.info("All services ready.")
     yield
     logger.info("Shutting down.")

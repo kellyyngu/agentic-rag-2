@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     # Agent
     max_reflection_iterations: int = Field(2, env="MAX_REFLECTION_ITERATIONS")
     confidence_threshold: float = Field(0.7, env="CONFIDENCE_THRESHOLD")
+    retrieval_relevance_threshold: float = Field(0.2, env="RETRIEVAL_RELEVANCE_THRESHOLD")
     web_search_fallback_threshold: int = Field(2, env="WEB_SEARCH_FALLBACK_THRESHOLD")
 
     # Data

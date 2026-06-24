@@ -8,7 +8,8 @@ class RetrievedChunk:
     content: str
     source: str
     page: Optional[int]
-    score: float
+    score: float          # sigmoid-normalised cross-encoder score (used for ranking)
+    vector_score: float = 0.0  # cosine similarity from Qdrant (used for display + filtering)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -63,6 +64,9 @@ class AgentState(TypedDict):
     citations: List[Citation]
     follow_up_questions: List[str]
 
+    # Retrieval quality gate
+    retrieval_confidence: float
+
     # Reflection
     reflection_passed: bool
     reflection_feedback: Optional[str]
@@ -71,4 +75,5 @@ class AgentState(TypedDict):
 
     # Observability
     trace: Dict[str, Any]
-    stream_queue: Optional[Any]  # asyncio.Queue for SSE events
+    stream_queue: Optional[Any]       # asyncio.Queue for SSE events
+    citation_manager: Optional[Any]   # CitationManager singleton from app.state

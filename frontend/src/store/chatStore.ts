@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { Message, Citation, AgentPlan, Theme } from '../types'
+import { Message, Citation, AgentPlan, AgentAction, Theme } from '../types'
 
 interface ChatState {
   messages: Message[]
@@ -16,8 +16,11 @@ interface ChatState {
   setCitations: (id: string, citations: Citation[]) => void
   setFollowUps: (id: string, questions: string[]) => void
   setConfidence: (id: string, confidence: number) => void
-  setConversational: (id: string) => void
+  setSourcesCount: (id: string, count: number) => void
+  setHideRagUI: (id: string) => void
   setAnswer: (id: string, text: string) => void
+  addAgentAction: (id: string, action: AgentAction) => void
+  updateLastAgentObservation: (id: string, tool: string, observation: string) => void
   finalizeMessage: (id: string, latency?: number) => void
   setError: (id: string, msg: string) => void
   setStreaming: (v: boolean) => void
@@ -109,15 +112,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }))
   },
 
-  setConversational: (id) => {
+  setSourcesCount: (id, count) => {
     set((s) => ({
-      messages: s.messages.map((m) => (m.id === id ? { ...m, isConversational: true } : m)),
+      messages: s.messages.map((m) => (m.id === id ? { ...m, sources_count: count } : m)),
+    }))
+  },
+
+  setHideRagUI: (id) => {
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, hideRagUI: true } : m)),
     }))
   },
 
   setAnswer: (id, text) => {
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, content: text } : m)),
+    }))
+  },
+
+  addAgentAction: (id, action) => {
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id
+          ? { ...m, agentActions: [...(m.agentActions ?? []), action] }
+          : m
+      ),
+    }))
+  },
+
+  updateLastAgentObservation: (id, tool, observation) => {
+    set((s) => ({
+      messages: s.messages.map((m) => {
+        if (m.id !== id || !m.agentActions?.length) return m
+        // Find the most recent action for this tool without an observation yet
+        const actions = [...m.agentActions]
+        const idx = actions.map((a, i) => ({ a, i }))
+          .reverse()
+          .find(({ a }) => a.tool === tool && !a.observation)?.i
+        if (idx === undefined) return m
+        actions[idx] = { ...actions[idx], observation }
+        return { ...m, agentActions: actions }
+      }),
     }))
   },
 

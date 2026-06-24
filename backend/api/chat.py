@@ -22,12 +22,12 @@ class ChatRequest(BaseModel):
     debug: bool = False
 
 
-async def _event_stream(query: str, history: list, retriever):
+async def _event_stream(query: str, history: list, retriever, citation_manager):
     """Generate SSE events from the agent graph."""
     start = time.time()
 
     try:
-        async for event in run_agent(query, history, retriever):
+        async for event in run_agent(query, history, retriever, citation_manager):
             payload = json.dumps(event["data"])
             yield f"event: {event['event']}\ndata: {payload}\n\n"
     except Exception as e:
@@ -45,9 +45,10 @@ async def chat(request: Request, body: ChatRequest):
         raise HTTPException(503, "Retriever not initialized")
 
     history = [m.model_dump() for m in body.conversation_history]
+    citation_manager = getattr(request.app.state, "citation_manager", None)
 
     return StreamingResponse(
-        _event_stream(body.query, history, retriever),
+        _event_stream(body.query, history, retriever, citation_manager),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

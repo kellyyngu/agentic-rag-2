@@ -11,6 +11,13 @@ export interface AgentPlan {
   strategy: string
 }
 
+export interface AgentAction {
+  tool: string
+  args: Record<string, unknown>
+  iteration: number
+  observation?: string  // filled in when agent_observation SSE arrives
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant'
@@ -18,8 +25,9 @@ export interface Message {
   citations: Citation[]
   follow_up_questions: string[]
   plan?: AgentPlan
+  agentActions?: AgentAction[]
   confidence?: number
-  isConversational?: boolean
+  hideRagUI?: boolean
   status: 'streaming' | 'complete' | 'error'
   created_at: number
   sources_count?: number
@@ -27,7 +35,7 @@ export interface Message {
 }
 
 export interface StreamEvent {
-  event: 'plan' | 'chunks' | 'web_search' | 'token' | 'citations' | 'follow_ups' | 'reflection' | 'done' | 'error'
+  event: 'plan' | 'chunks' | 'web_search' | 'token' | 'citations' | 'follow_ups' | 'reflection' | 'done' | 'error' | 'agent_action' | 'agent_observation'
   data: Record<string, unknown>
 }
 

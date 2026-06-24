@@ -1,0 +1,190 @@
+{
+  "_note": "Declarative functional test cases A1-A8. 'assert' keys are checked by functional.py. Source matching is case-insensitive substring, so 'OSM_PINN' matches 'OSM_PINN.pdf'. Adjust 'sources_all_from' tokens if your uploaded filenames differ.",
+  "cases": [
+    {
+      "id": "TC-RA-01",
+      "category": "Retrieval Accuracy",
+      "objective": "Correct chunk retrieved for an in-corpus concept",
+      "query": "What is the One-Sided Monotonic loss in OSM-PINN?",
+      "component": "Hybrid retriever + reranker",
+      "assert": {
+        "no_error": true,
+        "first_tool": "retrieve_documents",
+        "sources_all_from": ["OSM_PINN"],
+        "answer_contains_any": ["relu", "asymmetric", "penalt", "monotonic"]
+      }
+    },
+    {
+      "id": "TC-RA-02",
+      "category": "Retrieval Accuracy",
+      "objective": "Cross-document isolation - no contamination from other PDFs",
+      "query": "What is UBER in the ARS report?",
+      "component": "Vector-score contamination filter",
+      "assert": {
+        "no_error": true,
+        "first_tool": "retrieve_documents",
+        "answer_contains_any": ["uncertainty", "experience replay", "buffer"]
+      }
+    },
+    {
+      "id": "TC-TS-01",
+      "category": "Tool Selection Accuracy",
+      "objective": "General-knowledge query bypasses retrieval entirely",
+      "query": "What is a neural network?",
+      "component": "Intent router",
+      "assert": {
+        "no_error": true,
+        "tool_calls_count": {"op": "==", "value": 0},
+        "intent_in": ["general_knowledge"],
+        "answer_contains_any": ["neuron", "layer", "weight"]
+      }
+    },
+    {
+      "id": "TC-TS-02",
+      "category": "Tool Selection Accuracy",
+      "objective": "Niche in-corpus acronym triggers document retrieval, not web",
+      "query": "What is SwinTST?",
+      "component": "Orchestrator tool selection",
+      "assert": {
+        "no_error": true,
+        "first_tool": "retrieve_documents",
+        "answer_contains_any": ["transformer", "window", "forecast", "stock"]
+      }
+    },
+    {
+      "id": "TC-SC-01",
+      "category": "Query Reformulation / Self-Correction",
+      "objective": "Agent rewrites query after a WEAK retrieval",
+      "query": "what is osm pinn about",
+      "component": "Orchestrator self-correction",
+      "assert": {
+        "no_error": true,
+        "first_tool": "retrieve_documents",
+        "answer_contains_any": ["remaining useful life", "rul", "degradation", "monotonic"]
+      }
+    },
+    {
+      "id": "TC-SC-02",
+      "category": "Query Reformulation / Self-Correction",
+      "objective": "Loop is bounded - no more than MAX_ITERATIONS tool calls",
+      "query": "explain the obscure xyzqq concept from my documents",
+      "component": "Loop guard / iteration cap",
+      "assert": {
+        "no_error": true,
+        "tool_calls_count": {"op": "<=", "value": 3}
+      }
+    },
+    {
+      "id": "TC-WS-01",
+      "category": "Web Search Escalation",
+      "objective": "Escalates to web when documents do not cover the topic",
+      "query": "What is the latest news about OpenAI in 2025?",
+      "component": "Orchestrator escalation logic",
+      "assert": {
+        "no_error": true,
+        "tool_calls_count": {"op": "<=", "value": 3}
+      }
+    },
+    {
+      "id": "TC-WS-02",
+      "category": "Web Search Escalation",
+      "objective": "Graceful degradation - no crash even if web search fails/rate-limits",
+      "query": "What is the current weather in Tokyo right now?",
+      "component": "_exec_web exception handling",
+      "assert": {
+        "no_error": true
+      }
+    },
+    {
+      "id": "TC-RF-01",
+      "category": "Reflection and Answer Quality",
+      "objective": "Strong answer passes reflection",
+      "query": "What is SwinTST and what problem does it solve?",
+      "component": "Reflector confidence gate",
+      "assert": {
+        "no_error": true,
+        "reflection_passed": true
+      }
+    },
+    {
+      "id": "TC-RF-02",
+      "category": "Reflection and Answer Quality",
+      "objective": "Reflection completes without crashing on a normal doc query",
+      "query": "Summarize the methodology of the OSM-PINN paper",
+      "component": "Reflector JSON parser",
+      "assert": {
+        "no_error": true,
+        "reflection_passed": true
+      }
+    },
+    {
+      "id": "TC-CI-01",
+      "category": "Citation Accuracy",
+      "objective": "Every inline [N] reference resolves to a real citation",
+      "query": "Compare the loss functions in OSM-PINN and the ARS report",
+      "component": "Citation extraction + manager",
+      "assert": {
+        "no_error": true,
+        "citations_resolve": true
+      }
+    },
+    {
+      "id": "TC-CI-02",
+      "category": "Citation Accuracy",
+      "objective": "Document QA answer produces at least one grounded citation",
+      "query": "What architecture does OSM-PINN use?",
+      "component": "Generator citation pipeline",
+      "assert": {
+        "no_error": true,
+        "min_citations": 1,
+        "answer_contains_any": ["bilstm", "lstm", "attention", "encoder"]
+      }
+    },
+    {
+      "id": "TC-EC-01",
+      "category": "Robustness and Edge Cases",
+      "objective": "Gibberish input does not crash the system",
+      "query": "asdkjfh qwerty zzxcvb",
+      "component": "Full pipeline resilience",
+      "assert": {
+        "no_error": true,
+        "tool_calls_count": {"op": "<=", "value": 3}
+      }
+    },
+    {
+      "id": "TC-EC-02",
+      "category": "Robustness and Edge Cases",
+      "objective": "Identity query routes to assistant identity, not a generic LLM default",
+      "query": "what is your name",
+      "component": "Intent router",
+      "assert": {
+        "no_error": true,
+        "tool_calls_count": {"op": "==", "value": 0},
+        "intent_in": ["assistant_identity", "conversational"]
+      }
+    },
+    {
+      "id": "TC-PF-01",
+      "category": "Performance and Latency",
+      "objective": "Conversational fast-path responds quickly (no retrieval)",
+      "query": "how are you",
+      "component": "Conversational fast path",
+      "assert": {
+        "no_error": true,
+        "tool_calls_count": {"op": "==", "value": 0},
+        "max_latency_s": 15
+      }
+    },
+    {
+      "id": "TC-PF-02",
+      "category": "Performance and Latency",
+      "objective": "Full document-QA turn completes within latency budget",
+      "query": "What is SwinTST?",
+      "component": "Full pipeline",
+      "assert": {
+        "no_error": true,
+        "max_latency_s": 45
+      }
+    }
+  ]
+}

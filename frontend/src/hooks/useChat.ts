@@ -1,6 +1,6 @@
 import { useRef, useCallback } from 'react'
 import { useChatStore } from '../store/chatStore'
-import { Citation, AgentPlan } from '../types'
+import { Citation, AgentPlan, AgentAction } from '../types'
 
 const API_BASE = '/api'
 
@@ -72,10 +72,13 @@ export function useChat() {
 
           switch (event) {
             case 'conversational':
-              store.setConversational(assistantId)
+              store.setHideRagUI(assistantId)
               break
             case 'answer':
               store.setAnswer(assistantId, (data.text as string) || '')
+              break
+            case 'chunks':
+              store.setSourcesCount(assistantId, (data.count as number) || 0)
               break
             case 'plan':
               store.setPlan(assistantId, data as unknown as AgentPlan)
@@ -94,6 +97,16 @@ export function useChat() {
               break
             case 'done':
               store.finalizeMessage(assistantId, data.latency_s as number)
+              break
+            case 'agent_action':
+              store.addAgentAction(assistantId, data as unknown as AgentAction)
+              break
+            case 'agent_observation':
+              store.updateLastAgentObservation(
+                assistantId,
+                data.tool as string,
+                data.result as string,
+              )
               break
             case 'error':
               store.setError(assistantId, (data.message as string) || 'Unknown error')
