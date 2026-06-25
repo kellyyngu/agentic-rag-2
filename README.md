@@ -5,8 +5,44 @@ how to gather evidence** — which tool to call, how to reformulate a weak query
 escalate to web search, and when it has enough context to answer. It is not a fixed
 `retrieve → generate` pipeline; retrieval is a *decision*, not a hardcoded step.
 
-**Stack:** FastAPI · LangGraph · Google Gemini (function calling) · Qdrant · BM25 ·
+**Stack:** FastAPI · LangGraph · Google Gemini 2.0 Flash (function calling) · Qdrant · BM25 ·
 CrossEncoder reranker · Tavily · React + Vite (SSE streaming) · Docker Compose.
+
+---
+
+## README Audit Report
+
+*Produced by auditing the codebase against this document — kept here for transparency.*
+
+### Missing from previous version
+
+1. **Trajectory / integration test suite** — 7 multi-step scenario tests drive real node
+   functions with only external boundaries mocked; recorded node-path assertions protect
+   against inter-node interaction bugs invisible to unit tests.
+2. **Unit test inventory** — 5 test files, 182 tests total; previous Section 12 only
+   described the evaluation harness.
+3. **Grounding gate** (`_is_negative_answer`) — detects "not found" answers, suppresses all
+   citations, and caps `confidence_score ≤ 0.25` regardless of the LLM's self-rating.
+4. **Confidence threshold calibration** — `confidence_threshold = 0.50` (not naive 0.70);
+   calibrated for `all-MiniLM-L6-v2` on academic text, where correct answers score 0.50–0.65.
+5. **PDF symbol font decoding** — `_clean_pdf_text` maps PyPDF2 glyph codes
+   (`/H11005 → =`, `/H11021 → <`, etc.) so citation snippets are human-readable.
+6. **Evidence-centric snippet extraction** — `_evidence_snippet` selects the most relevant
+   passage per citation using keyword overlap scoring, not a blind first-500-chars truncation.
+7. **Generator sentinel-stop streaming** — the `<<<JSON` marker halts token emission to the
+   SSE stream; the JSON metadata block is parsed server-side and never shown in the chat.
+8. **`grounding_threshold`** (0.30, separate from `safe_fail_threshold` 0.15) — controls
+   when the generator includes citations vs suppresses them.
+9. **Web-guard in `_should_continue`** — a failed reflection on a web-grounded answer does
+   NOT re-trigger document retrieval; it ends the loop, preserving the live web result.
+10. **`safe_fail` branch from `web_search` node** — architecture diagram was missing this edge.
+
+### Outdated in previous version
+
+- Architecture diagram showed `safe_fail` only reachable from orchestrator — it is also
+  reachable from `web_search` (when web returns nothing and no chunks exist).
+- Section 4 described the reflection loop but omitted the web-guard termination condition.
+- Section 12 (Testing) described only the eval harness; the unit + trajectory suite was absent.
 
 ---
 
@@ -58,31 +94,41 @@ explicitly with iteration bounds and early-exit conditions.
                      │   Orchestrator   │   │ Direct  │    │Web Search │
                      │ (ReAct tool loop)│   │ answer  │    │ (Tavily)  │
                      └────────┬─────────┘   └────┬────┘    └─────┬─────┘
-            ┌─────────────────┼──────────────┐   │               │
-            │ retrieve_documents              │   │               │
-            │ web_search                      │   │               │
-            ▼                                 ▼   │               │
-   ┌──────────────────┐              ┌──────────────────┐         │
-   │ Hybrid Retriever │              │  Safe-Fail Gate  │         │
-   │ BM25 + Vector    │              │ weak + no web →  │         │
-   │ → RRF → Rerank   │              │ refuse, skip gen │         │
-   └────────┬─────────┘              └────────┬─────────┘         │
-            │                                 │                   │
-            ▼                                 │                   │
-   ┌──────────────────┐                       │                   │
-   │   Generator      │◀──────────────────────┼───────────────────┘
-   │ grounded answer  │                       │
-   │ + inline [N]     │                       │
-   └────────┬─────────┘                       │
-            ▼                                  │
-   ┌──────────────────┐   fail & iter<max     │
-   │   Reflector      │──────────┐            │
-   │ quality verdict  │          │ re-retrieve│
-   └────────┬─────────┘          ▼            │
-            │ pass        ┌──────────────┐    │
-            ▼             │  Retriever   │────┘
-          DONE            │ (retry pass) │
-                          └──────────────┘
+                              │                   │               │
+              ┌───────────────┤                   │        ┌──────┴──────┐
+              │ weak+no web   │ general_knowledge │        │  has result?│
+              ▼               ▼                   │        ├─────────────┤
+   ┌─────────────────┐  ┌─────────┐               │  yes → │  Generator  │
+   │  Safe-Fail Gate │  │ Direct  │               │        └─────┬───────┘
+   │  (refuse, no    │  └─────────┘               │  no  → │ Safe-Fail   │
+   │   hallucination)│                             │        └─────────────┘
+   └─────────────────┘                             │
+                                                   │
+              ┌──────────────────────────────────── ┘
+              │
+              ▼
+   ┌──────────────────┐
+   │ Hybrid Retriever │
+   │ BM25 + Vector    │
+   │ → RRF → Rerank   │
+   └────────┬─────────┘
+            │
+            ▼
+   ┌──────────────────┐
+   │   Generator      │
+   │ grounded answer  │
+   │ + inline [N]     │
+   │ grounding gate   │
+   └────────┬─────────┘
+            ▼
+   ┌──────────────────┐   fail & iter<max & no web
+   │   Reflector      │──────────────┐
+   │ quality verdict  │              │ re-retrieve
+   └────────┬─────────┘              ▼
+            │ pass            ┌──────────────┐
+            ▼                 │  Retriever   │
+          DONE                │ (retry pass) │
+                              └──────────────┘
 ```
 
 The graph is implemented as a **LangGraph `StateGraph`** with conditional edges. State
@@ -90,10 +136,19 @@ flows through a typed `AgentState` (`backend/agent/state.py`); every node emits
 **Server-Sent Events** so the React frontend renders the agent's decisions (tool calls,
 retrieval quality, reflection verdict) live.
 
-**Why LangGraph over a hand-rolled loop:** the routing logic (intent → orchestrator →
-safe-fail / generate → reflect → retry) is expressed as explicit, inspectable edges rather
-than nested conditionals. The control flow *is* the graph, which makes the agent's behaviour
-auditable — a property that matters more than raw line count.
+**Key routing functions** (`backend/agent/graph.py`):
+
+| Function | Controls |
+|---|---|
+| `_route_after_intent` | conversational/general → direct; web_search → web_search; else → orchestrator |
+| `_route_after_orchestrator` | general_knowledge → direct; weak+no web → safe_fail; else → generate |
+| `_route_after_retrieval` | (reflector retry path) low chunks → web_search; else → generate |
+| `_route_after_web_search` | has web or chunks → generate; nothing → safe_fail |
+| `_should_continue` | passed or budget exhausted or web-grounded → end; else → retrieve |
+
+**Why LangGraph over a hand-rolled loop:** the routing logic is expressed as explicit,
+inspectable edges rather than nested conditionals. The control flow *is* the graph, making
+the agent's behaviour auditable — a property that matters more than raw line count.
 
 ---
 
@@ -104,6 +159,14 @@ The orchestrator (`backend/agent/orchestrator.py`) is a bounded ReAct loop built
 
 ```
 for iteration in range(orchestrator_max_iterations):     # default 3
+    if iteration == 0:
+        # FORCED first action: always retrieve documents before the LLM decides.
+        # Queries routed to orchestrator are document_qa; without forcing retrieval
+        # the LLM sometimes web-searches questions the uploaded docs could answer.
+        obs = retrieve_documents(query)
+        if len(good_chunks) >= MIN_GOOD_CHUNKS: break
+        continue
+
     decision = LLM.decide(tools=[retrieve_documents, web_search], context)
 
     if decision is "no tool call":           # THINK: context is sufficient
@@ -128,19 +191,27 @@ Key control mechanisms:
   prevents the model from spinning on the same failing call.
 - **Early exit:** once ≥3 high-quality chunks are accumulated, the loop stops without
   burning the remaining iteration budget.
+- **Forced first retrieval:** iteration 0 always retrieves documents; the LLM only makes
+  autonomous decisions from iteration 1 onward.
 
 **Reflect (separate node):** after generation, the reflector
 (`backend/agent/nodes/reflector.py`) scores the answer for completeness and grounding. If it
-fails *and* the iteration budget allows, the graph **loops back to re-retrieve** using the
-reflector's feedback as a refined query, then regenerates. This is a real closed loop
-(`generator → reflector → retriever → generator`), bounded by `max_reflection_iterations`
-(default 2), not a dead-end verdict.
+fails *and* the iteration budget allows *and* the answer is not web-grounded, the graph
+**loops back to re-retrieve** using the reflector's feedback as a refined query, then
+regenerates. This is a real closed loop (`generator → reflector → retriever → generator`),
+bounded by `max_reflection_iterations` (default 2).
 
-**Robustness detail:** all classification/short-output LLM calls (router, reflector) set
-`thinking_budget=0` and use constrained decoding (`response_schema` +
-`response_mime_type=application/json`). On Gemini Flash, "thinking" tokens otherwise consume
-the `max_output_tokens` budget and truncate the JSON — disabling them for simple
-classification eliminated a class of intermittent parse failures.
+**Web-guard:** if the current answer is grounded in web search results,
+`_should_continue` returns `"end"` even on a failed reflection — re-retrieving documents
+would discard the live web result and fall back to stale general knowledge. The web answer
+is preserved.
+
+**Robustness detail:** the reflector uses Gemini **constrained decoding**
+(`response_schema + response_mime_type=application/json`) combined with
+`thinking_budget=0`. On Gemini Flash, thinking tokens otherwise consume the
+`max_output_tokens` budget and truncate the JSON — disabling them for simple
+classification eliminated a class of intermittent parse failures. The same pattern applies
+to the intent router.
 
 ---
 
@@ -164,6 +235,9 @@ CrossEncoder rerank            ms-marco-MiniLM-L-6-v2, joint query–chunk scori
   ▼
 top-5 chunks  (vector_score preserved for the confidence gate + citation display)
 ```
+
+Chunks below `min_vector_score = 0.10` are filtered out before reranking to prevent
+off-topic cross-document contamination.
 
 **Design rationale:**
 
@@ -195,13 +269,76 @@ retrieved chunk (`backend/agent/nodes/generator.py`):
 3. The displayed relevance score per citation is the chunk's **vector cosine similarity**,
    not the reranker logit (more meaningful to a human reader).
 
+**Grounding gate (`_is_negative_answer`):** before finalising citations, the generator
+checks whether the answer is a "not found" reply (e.g. *"the paper does not mention X"*,
+*"I could not find any relevant information"*). If so:
+- All citations are suppressed (no dangling `[N]` markers on a non-answer).
+- `confidence_score` is capped at `≤ 0.25` regardless of the LLM's self-reported score.
+- The `[N]` markers are stripped from the answer text.
+
+This prevents the adversarial pattern where an LLM assigns high confidence (e.g. 0.85) to
+a "not found" answer that happens to cite a retrieved chunk.
+
+A separate **`grounding_threshold`** (0.30) gates citation inclusion for positive answers:
+if the top cited chunk's vector score is below this threshold, citations are also suppressed
+— the answer is not grounded well enough to warrant them.
+
+**Evidence-centric snippets:** each citation card in the UI shows a passage selected from
+the chunk by `_evidence_snippet`, which:
+1. Tokenises the chunk into sentences.
+2. Scores each sentence by keyword overlap with the *claiming sentence* from the answer
+   (identified by `_claim_for`).
+3. Returns the best-matching sentence ± one neighbour (for context), trimmed to whole
+   sentences, max 600 characters.
+
+This replaces a blind first-500-characters truncation; users see the passage that
+actually supports the claim, not the opening boilerplate.
+
+**PDF symbol font decoding:** PyPDF2 emits glyph codes instead of real characters for
+Symbol-font PDFs (common in academic statistics papers). `_clean_pdf_text` maps these
+before snippet extraction: `/H11005 → =`, `/H11021 → <`, `/H11022 → >`, `/H11349 → ±`,
+and twelve others. This ensures citation snippets are human-readable (e.g.
+`r = .58, p < .001` instead of `r /H11005 .58, p /H11021 .001`).
+
 **Session safety:** `CitationManager` is scoped per `session_id` (or per-request when no
 session id is supplied) — there is **no process-global shared citation state**, so
 concurrent users never collide on or leak each other's citation IDs.
 
 ---
 
-## 7. Web Search Augmentation
+## 7. Generator Streaming & Output Guard
+
+The generator streams tokens to the SSE queue via `generate_content_stream`. To prevent
+the trailing JSON metadata block from appearing in the chat, the stream is intercepted by a
+**sentinel-stop guard**:
+
+```python
+_SENTINEL = "<<<JSON"
+_KEEP = len(_SENTINEL) - 1   # 6-char lookahead buffer
+
+pending = ""
+for chunk in response:
+    pending += chunk.text
+    idx = pending.find(_SENTINEL)
+    if idx != -1:
+        emit(pending[:idx])       # flush text before sentinel
+        stop_streaming()          # suppress everything after
+    elif len(pending) > _KEEP:
+        emit(pending[:-_KEEP])    # emit safe prefix, hold possible sentinel start
+        pending = pending[-_KEEP:]
+```
+
+The complete output (answer + JSON block) is reassembled server-side. `_extract_meta`
+parses the metadata with a three-tier fallback: `<<<JSON…>>>` delimiters, fenced
+` ```json ``` ` blocks, and raw trailing JSON. A fourth pattern catches **truncated**
+`<<<JSON` blocks (model ran out of token budget mid-JSON) — `split_pos` is still returned
+so the partial block is stripped before the answer is stored.
+
+Generator settings: `max_output_tokens=2048`, `temperature=0.1`.
+
+---
+
+## 8. Web Search Augmentation
 
 When the intent router classifies a query as `web_search`, or when the orchestrator decides
 document retrieval is consistently WEAK, the agent calls **Tavily**
@@ -213,7 +350,7 @@ search degrades gracefully and the agent answers from document context only.
 
 ---
 
-## 8. Evaluation Framework
+## 9. Evaluation Framework
 
 The harness (`backend/evaluate/`) drives the **real** LangGraph agent over a 40-question
 benchmark (`single_hop`, `multi_hop`, `out_of_corpus`, `conversational`, `adversarial`) and
@@ -226,11 +363,11 @@ docker compose exec backend python -m evaluate.run_all --suite agentic
 docker compose exec backend python -m evaluate.ablation                # retrieval ablation
 ```
 
-### 8.1 Functional suite
+### 9.1 Functional suite
 Behavioural assertions (e.g. *loop is bounded ≤ N tool calls*, *out-of-corpus escalates to
 web*, *greeting calls no tool*). Pass/fail per case — a regression tripwire.
 
-### 8.2 Agentic decision metrics (`agentic.py`)
+### 9.2 Agentic decision metrics (`agentic.py`)
 Computed entirely from execution traces — they score the **decision process**, not just the
 answer:
 
@@ -243,7 +380,7 @@ answer:
 | **Keyword recall** *(deterministic)* | Fraction of required ground-truth keywords present in the answer. |
 | **Latency P50 / P95** | End-to-end query latency distribution. |
 
-### 8.3 Retrieval ablation (`ablation.py`)
+### 9.3 Retrieval ablation (`ablation.py`)
 A controlled experiment: the **same** pipeline and dataset are run three times, changing
 **only** which ranked list(s) feed RRF (`bm25` / `vector` / `hybrid`). Reranker, thresholds,
 and prompts are held constant, isolating retrieval strategy as the single variable.
@@ -274,7 +411,7 @@ right anchor when you need to *defend* a number, not just report one.
 
 ---
 
-## 9. Agentic RAG vs Traditional RAG
+## 10. Agentic RAG vs Traditional RAG
 
 | Dimension | Traditional RAG | Agentic RAG (this system) |
 |---|---|---|
@@ -294,7 +431,7 @@ some live, some adversarial) and **confident-but-wrong answers are expensive**.
 
 ---
 
-## 10. System Design Tradeoffs
+## 11. System Design Tradeoffs
 
 | Decision | Chosen | Why / cost |
 |---|---|---|
@@ -303,13 +440,15 @@ some live, some adversarial) and **confident-but-wrong answers are expensive**.
 | Fusion | RRF (rank-based) | No weight tuning, scale-invariant vs loses raw-score magnitude. |
 | Reranker | CrossEncoder | Large precision gain vs added inference cost per query. |
 | Embedder | all-MiniLM-L6-v2 (384-d) | Fast, CPU-friendly, cheap vs a larger model would lift the recall ceiling. |
-| Safe-fail threshold | Conservative (0.15) | Avoids wrongly refusing valid low-cosine summary queries vs lets some weak answers through to the generator's own "insufficient context" handling. |
-| Config | Thresholds/iterations in `config.py` (env-overridable) | Operators tune without code changes. |
+| Safe-fail threshold | `safe_fail_threshold = 0.15` | Conservative to avoid wrongly refusing valid low-cosine meta/summary queries. |
+| Grounding threshold | `grounding_threshold = 0.30` | Citations suppressed below this cosine — only assert grounding when evidence is meaningful. |
+| Confidence threshold | `confidence_threshold = 0.50` | Calibrated for all-MiniLM-L6-v2 on academic text (0.50–0.65 range); naive 0.70 causes correct answers to be retried and worsened. |
+| Config | All thresholds/iterations in `config.py` (env-overridable) | Operators tune without code changes. |
 | Citations | Per-session manager | Multi-user safe vs unbounded session map growth over a long-lived process (acceptable for the demo; would add TTL eviction in production). |
 
 ---
 
-## 11. Demo / How to Run
+## 12. Demo / How to Run
 
 **Prerequisites:** Docker + Docker Compose, a Google Gemini API key, and (optional, for web
 search) a Tavily API key.
@@ -357,34 +496,91 @@ npm install && npm run dev                                          # :5173
 
 ---
 
-## 12. Testing Strategy — how quality is ensured
+## 13. Testing Strategy — how quality is ensured
 
-Quality assurance is layered, and deliberately **not** dependent on a single LLM judge:
+Quality assurance is layered across three tiers, and deliberately **not** dependent on a
+single LLM judge.
 
-1. **Functional behavioural tests** — assert structural invariants of the agent: the tool
-   loop is bounded, out-of-corpus queries escalate, greetings call no tool, the safe-fail
-   gate triggers on weak retrieval. These catch *control-flow* regressions.
+### 13.1 Unit tests — 182 tests, 5 files
 
-2. **Deterministic answer metrics** — keyword recall against source-verifiable ground-truth
-   keywords. No model in the scoring loop → reproducible, bias-free, defensible.
+```
+backend/tests/
+├── test_retrieval.py    — RRF fusion logic (rank ordering, score accumulation, degenerate inputs)
+├── test_router.py       — intent router: conversational regex, web-query regex, DIRECT_INTENTS set
+├── test_safe_fail.py    — graph routing functions: safe-fail gate, reflection loop, web-guard
+├── test_citations.py    — citation pipeline: CitationManager, _extract_meta (3-tier fallback + truncation),
+│                          _remap_citation_groups, _is_negative_answer (grounding gate),
+│                          _clean_pdf_text (PDF symbol fonts), _evidence_snippet, _keyword_recall
+└── test_trajectories.py — 7 multi-step trajectory tests (see §13.2)
+```
 
-3. **Trace-derived decision metrics** — tool selection, reformulation recovery, web
-   escalation, citation resolution. These verify the agent *reasoned* correctly, not just
-   that the final string looked plausible.
+Key coverage areas per file:
 
-4. **Controlled ablation** — isolates one variable (retrieval strategy) to produce evidence
-   that the hybrid design choice is justified, rather than asserted.
+**`test_retrieval.py`** — verifies RRF is rank-based (not score-based), accumulates scores
+correctly across two lists, handles single-list and empty-list inputs.
 
-**Test-case design principles:** the benchmark is stratified by category so each capability
-is exercised independently — `single_hop` (precision), `multi_hop` (synthesis),
-`out_of_corpus` (escalation), `conversational` (no-tool routing), and `adversarial`
-(false-premise and gibberish inputs that must not produce fabricated content). Each item
-carries an `expected_tool` and `required_keywords` so both the *path* and the *content* are
-checkable.
+**`test_router.py`** — protects the deterministic fast-paths: 32 conversational patterns that
+must bypass the LLM, 10 real-time patterns that must route to web_search, 5 intents that
+must (not) be in `DIRECT_INTENTS`.
+
+**`test_safe_fail.py`** — exercises all nine routing transitions across four routing functions.
+Includes a regression test for the exchange-rate bug: a web-grounded answer with
+`reflection_passed=False` must not re-trigger document retrieval.
+
+**`test_citations.py`** — 60+ assertions across seven classes: idempotency and thread-safety of
+`CitationManager`, three-tier metadata parser including the truncated-`<<<JSON` regression,
+grouped citation remapping (the `[2, 4]` parser bug), grounding gate detection, PDF glyph
+decoding, evidence snippet keyword scoring, and the `_keyword_recall` eval metric.
+
+### 13.2 Trajectory (integration) tests — 7 scenarios
+
+`TrajectoryRunner` (`backend/tests/test_trajectories.py`) executes the **real** node
+`run()` functions and **real** routing functions, walking the actual graph topology
+expressed as `CONDITIONAL` + `FIXED` edge tables (a 1:1 transcription of `build_graph()`).
+Only three external boundaries are mocked: the Gemini `_client` per module, the retriever
+service, and Tavily. Fully offline, deterministic, no API keys.
+
+Each test asserts **both** the execution path (`runner.path`) and the final state fields —
+the two things unit tests cannot see.
+
+| Test | Scenario | Path asserted | State asserted |
+|---|---|---|---|
+| **T1** | Web answer preserved after failed reflection | `router→web_search→generator→reflector` | `"Kuala Lumpur" in answer`, `citations == []` |
+| **T2** | Document answer stays doc-grounded, no web escalation | `router→orchestrator→generator→reflector` | `web_search_results == []`, citations present |
+| **T3** | Reflection retry uses improved retrieval, exactly once | retriever count = 1, generator count = 2 | stronger chunks used, confidence ≥ 0.5 |
+| **T4a** | Both sources empty → graceful general_knowledge downgrade | ends at `direct`, generator never ran | `citations == []`, no hallucinated refs |
+| **T4b** | Weak retrieval + no web → safe_fail refusal | ends at `safe_fail` | `confidence_score == 0.0`, "couldn't find" |
+| **T5** | Valid web answer NOT downgraded after reflection failure | `router→web_search→generator→reflector` | `intent == "web_search"` (not general_knowledge) |
+| **T6** | Negative ("not found") answer → citations suppressed, confidence low | orchestrator path | `citations == []`, `confidence ≤ 0.25`, no `[1]` in answer |
+
+**Test teeth:** reintroducing the pre-fix `_should_continue` (without the web-guard) causes
+T5 to raise `AssertionError` immediately — regressions are caught, not just described.
+
+### 13.3 Evaluation harness (`backend/evaluate/`)
+
+Drives the real LangGraph agent over 40 benchmark questions:
+
+- **Functional suite** — pass/fail behavioural assertions (loop bounds, escalation,
+  greeting routing).
+- **Agentic metrics** — tool selection, reformulation recovery, web escalation, citation
+  resolution, keyword recall, latency P50/P95.
+- **Retrieval ablation** — controlled BM25 vs vector vs hybrid comparison (see §9.3).
+
+### Why this test architecture
+
+| Tier | What it catches | What it misses |
+|---|---|---|
+| Unit | Function-level logic, edge cases, regressions | Multi-node interaction bugs |
+| Trajectory | Inter-node interaction bugs, routing chains, state propagation | Real LLM behaviour |
+| Evaluation harness | End-to-end correctness with real LLM calls | Slow, non-deterministic, expensive |
+
+The three tiers complement each other: unit tests run in < 1 s and catch 90% of regressions;
+trajectory tests add multi-step path coverage with zero API cost; the eval harness produces
+the numbers you defend in a demo or report.
 
 ---
 
-## 13. Limitations & Future Improvements
+## 14. Limitations & Future Improvements
 
 Stated honestly — these are known, not hidden:
 
@@ -403,27 +599,29 @@ Stated honestly — these are known, not hidden:
 
 ---
 
-## 14. Tech Stack
+## 15. Tech Stack
 
 - **Frontend:** React 18, Vite, TypeScript, Tailwind CSS, Zustand; SSE streaming UI with a
   live agent-trace panel.
 - **Backend:** FastAPI (Python 3.11), LangGraph `StateGraph` orchestration.
-- **LLM:** Google Gemini Flash via `google-genai` (native function calling, constrained
-  decoding).
+- **LLM:** Google Gemini 2.0 Flash (`gemini-2.0-flash`) via `google-genai` (native function
+  calling, constrained decoding for classification nodes).
 - **Vector store:** Qdrant. **Lexical:** `rank-bm25`. **Reranker:**
   `cross-encoder/ms-marco-MiniLM-L-6-v2`. **Embeddings:** `all-MiniLM-L6-v2`.
 - **Web search:** Tavily. **Deployment:** Docker Compose (Qdrant + backend + frontend).
 
 ---
 
-## 15. Conclusion
+## 16. Conclusion
 
 This project implements Agentic RAG as a **bounded, observable decision system** rather than
 a static retrieval chain: an LLM agent that selects tools, reformulates weak queries,
 escalates to the web, self-corrects through a reflection loop, grounds every claim with
 session-stable citations, and **refuses when evidence is insufficient**. Design choices —
 hybrid retrieval with RRF and cross-encoder reranking, iteration bounds with early exit,
-constrained-decoding calibration, per-session citation scoping — are made explicitly and,
-where it matters, **validated empirically** with a deterministic, reproducible evaluation
-harness. The result is a system whose behaviour can be defended with measurements, not
-adjectives.
+constrained-decoding calibration, per-session citation scoping, grounding gate with negative
+answer detection, confidence threshold calibrated to the embedder's actual score distribution
+— are made explicitly and, where it matters, **validated empirically** with both a
+deterministic reproducible evaluation harness and a trajectory test suite that locks in
+previously discovered inter-node bugs. The result is a system whose behaviour can be
+defended with measurements, not adjectives.

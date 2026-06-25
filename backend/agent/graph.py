@@ -71,15 +71,55 @@ def _should_continue(state: AgentState) -> str:
     return "retrieve"
 
 
+# ── Terminal sink nodes ─────────────────────────────────────────────────────
+# Module-level (not closures) so trajectory tests can drive the real code path.
+# These capture no per-request dependencies (no retriever_service), so extracting
+# them from build_graph is purely structural — behaviour is identical.
+
+async def direct_node(state: AgentState) -> AgentState:
+    intent = state.get("intent", "general_knowledge")
+    if not state.get("answer"):
+        await intent_router._handle_direct(state, intent)
+    return state
+
+
+async def safe_fail_node(state: AgentState) -> AgentState:
+    """Production-safe fallback: weak retrieval + no web → refuse, skip the generator."""
+    if state.get("intent") == "web_search":
+        # Real-time query but web search produced nothing — usually because
+        # TAVILY_API_KEY isn't configured. Be explicit rather than blaming the docs.
+        msg = (
+            "This looks like a question that needs live web data, but I couldn't "
+            "retrieve any web results. If web search isn't configured, set "
+            "TAVILY_API_KEY to enable real-time answers (weather, news, prices)."
+        )
+    else:
+        msg = (
+            "I couldn't find enough relevant information in the uploaded documents to "
+            "answer this confidently, and no web results were available. Try rephrasing "
+            "the question or adding more detail."
+        )
+    state["answer"] = msg
+    state["citations"] = []
+    state["follow_up_questions"] = []
+    state["confidence_score"] = 0.0
+    state["reflection_passed"] = True  # terminal — no reflection retry
+    state["trace"]["safe_fail"] = {
+        "triggered": True,
+        "retrieval_confidence": round(state.get("retrieval_confidence", 0.0), 3),
+        "reason": "low_confidence_no_web",
+    }
+    q = state.get("stream_queue")
+    if q:
+        await q.put({"event": "answer", "data": {"text": msg}})
+        await q.put({"event": "citations", "data": {"citations": []}})
+        await q.put({"event": "follow_ups", "data": {"questions": []}})
+    return state
+
+
 def build_graph(retriever_service: Any) -> Any:
     async def router_node(state: AgentState) -> AgentState:
         return await intent_router.run(state)
-
-    async def direct_node(state: AgentState) -> AgentState:
-        intent = state.get("intent", "general_knowledge")
-        if not state.get("answer"):
-            await intent_router._handle_direct(state, intent)
-        return state
 
     async def orchestrator_node(state: AgentState) -> AgentState:
         """LLM-driven tool loop — replaces the old planner + initial retriever."""
@@ -97,39 +137,6 @@ def build_graph(retriever_service: Any) -> Any:
 
     async def reflector_node(state: AgentState) -> AgentState:
         return await reflector.run(state)
-
-    async def safe_fail_node(state: AgentState) -> AgentState:
-        """Production-safe fallback: weak retrieval + no web → refuse, skip the generator."""
-        if state.get("intent") == "web_search":
-            # Real-time query but web search produced nothing — usually because
-            # TAVILY_API_KEY isn't configured. Be explicit rather than blaming the docs.
-            msg = (
-                "This looks like a question that needs live web data, but I couldn't "
-                "retrieve any web results. If web search isn't configured, set "
-                "TAVILY_API_KEY to enable real-time answers (weather, news, prices)."
-            )
-        else:
-            msg = (
-                "I couldn't find enough relevant information in the uploaded documents to "
-                "answer this confidently, and no web results were available. Try rephrasing "
-                "the question or adding more detail."
-            )
-        state["answer"] = msg
-        state["citations"] = []
-        state["follow_up_questions"] = []
-        state["confidence_score"] = 0.0
-        state["reflection_passed"] = True  # terminal — no reflection retry
-        state["trace"]["safe_fail"] = {
-            "triggered": True,
-            "retrieval_confidence": round(state.get("retrieval_confidence", 0.0), 3),
-            "reason": "low_confidence_no_web",
-        }
-        q = state.get("stream_queue")
-        if q:
-            await q.put({"event": "answer", "data": {"text": msg}})
-            await q.put({"event": "citations", "data": {"citations": []}})
-            await q.put({"event": "follow_ups", "data": {"questions": []}})
-        return state
 
     workflow = StateGraph(AgentState)
     workflow.add_node("router",       router_node)
