@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict, Tuple, Optional
 from loguru import logger
 
@@ -31,6 +32,10 @@ class HybridRetriever:
         self.bm25_index = bm25_index
         self.reranker = reranker
 
+        # Retrieval mode for ablation studies: "hybrid" (default), "bm25", or "vector".
+        # Only affects which ranked list(s) feed RRF — reranker/thresholds unchanged.
+        self.mode = os.getenv("RETRIEVAL_MODE", "hybrid")
+
         # Cache chunk content for reranking (chunk_id → (content, source, page))
         self._chunk_cache: Dict[str, Tuple[str, Optional[str], Optional[int]]] = {}
 
@@ -49,8 +54,15 @@ class HybridRetriever:
             self._chunk_cache[chunk_id] = (content, source, page)
             vector_score_map[chunk_id] = float(score)
 
-        # 3. RRF fusion
-        fused_scores = _reciprocal_rank_fusion(bm25_ranked, vector_ranked)
+        # 3. RRF fusion — ablation mode selects which ranked list(s) drive candidate selection.
+        #    Both searches always run so vector_score stays available for the confidence gate;
+        #    only the fusion inputs change, isolating the retrieval-strategy variable.
+        if self.mode == "bm25":
+            fused_scores = _reciprocal_rank_fusion(bm25_ranked)
+        elif self.mode == "vector":
+            fused_scores = _reciprocal_rank_fusion(vector_ranked)
+        else:  # hybrid (default)
+            fused_scores = _reciprocal_rank_fusion(bm25_ranked, vector_ranked)
         fused_sorted = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
 
         # 4. Build candidates for reranking — attach vector_score so it survives reranking
@@ -73,5 +85,5 @@ class HybridRetriever:
 
         # 5. CrossEncoder reranking
         reranked = self.reranker.rerank(query, candidates, top_k=top_k)
-        logger.info(f"[hybrid] query='{query[:50]}' bm25={len(bm25_results)} vec={len(vector_results)} after_rerank={len(reranked)}")
+        logger.info(f"[{self.mode}] query='{query[:50]}' bm25={len(bm25_results)} vec={len(vector_results)} after_rerank={len(reranked)}")
         return reranked
