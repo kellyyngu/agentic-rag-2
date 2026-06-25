@@ -77,10 +77,14 @@ You are a research orchestrator. Your only job is to gather context by calling t
 Rules:
 1. For questions about uploaded files, reports, or specific domain terms → call retrieve_documents.
 2. For current events, live data, or if documents clearly won't help → call web_search.
-3. If retrieve_documents returns WEAK quality: rewrite the query and retry, OR switch to web_search.
+3. If retrieve_documents returns WEAK quality: you MUST rewrite the query and retry with a
+   more specific or differently-phrased query. For summarization/overview queries, break the
+   topic into specific sub-aspects (methodology, results, contributions) and retrieve each.
+   Only give up on documents after 2 WEAK attempts — then either web_search or stop.
 4. Stop calling tools (respond with no function call) when:
    - You received quality=GOOD from retrieval (≥40% avg relevance), OR
    - You have useful web results, OR
+   - You have retried twice with WEAK results and reformulation did not help, OR
    - The question is a greeting or needs no external context.
 5. Never write the final answer — only decide WHEN to stop and WHICH tools to call."""
 
@@ -122,6 +126,45 @@ async def run(state: AgentState, retriever_service: Any) -> AgentState:
             f"[orchestrator] iter={iteration} "
             f"chunks={len(accumulated_chunks)} web={len(accumulated_web)}"
         )
+
+        # ── Forced first action: always retrieve documents ─────────────────
+        # Every query routed to the orchestrator is a document_qa intent (the
+        # router sends real-time/conversational queries elsewhere). The LLM has
+        # no way to know which terms live in the uploaded docs, so left to choose
+        # it sometimes web-searches a question that the documents answer. Force a
+        # document retrieval first; the LLM still decides what to do from iter 1.
+        if iteration == 0:
+            sig = f"retrieve_documents:{query.lower().strip()}"
+            call_signatures.add(sig)
+            logger.info(f"[orchestrator] → retrieve_documents(query={query!r}) [forced first]")
+            if q_stream:
+                await q_stream.put({
+                    "event": "agent_action",
+                    "data": {"tool": "retrieve_documents", "args": {"query": query}, "iteration": 0},
+                })
+            obs = await _exec_retrieve(query, retriever_service, accumulated_chunks, seen_ids)
+            call_log.append({"tool": "retrieve_documents", "args": {"query": query}, "obs": obs["summary"]})
+            logger.info(f"[orchestrator] ← {obs['summary']}")
+            if q_stream:
+                await q_stream.put({
+                    "event": "agent_observation",
+                    "data": {"tool": "retrieve_documents", "result": obs["summary"], "iteration": 0},
+                })
+            # Seed the retrieval result into the existing user turn (single turn —
+            # avoids consecutive same-role messages) so the LLM decides from iter 1.
+            contents[0].parts.append(types.Part(text=(
+                f"\n\n[Documents already retrieved for this query]\n{obs['for_llm']}\n\n"
+                "If this is GOOD quality, respond with NO tool call. If WEAK, either "
+                "retry retrieve_documents with a sharper query, or call web_search."
+            )))
+            good_chunks = [
+                c for c in accumulated_chunks
+                if c.vector_score >= settings.orchestrator_quality_threshold
+            ]
+            if len(good_chunks) >= MIN_GOOD_CHUNKS:
+                logger.info(f"[orchestrator] {len(good_chunks)} good chunks — stopping early")
+                break
+            continue
 
         # ── LLM decision step ──────────────────────────────────────────────
         response = await asyncio.to_thread(

@@ -42,8 +42,7 @@ async def run(state: AgentState, retriever: Any) -> AgentState:
     # Filter out cross-document contamination: chunks with very low vector similarity
     # are genuinely unrelated to the query and will only confuse the generator.
     # Keep at least 2 chunks even if all are below threshold (e.g. doc-summary queries).
-    MIN_VECTOR_SCORE = 0.25
-    filtered = [c for c in top_chunks if c.vector_score >= MIN_VECTOR_SCORE]
+    filtered = [c for c in top_chunks if c.vector_score >= settings.min_vector_score]
     if len(filtered) < 2 and top_chunks:
         filtered = top_chunks[:2]  # fallback: keep top-2 by reranker score
     top_chunks = filtered

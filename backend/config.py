@@ -32,7 +32,11 @@ class Settings(BaseSettings):
 
     # Agent
     max_reflection_iterations: int = Field(2, env="MAX_REFLECTION_ITERATIONS")
-    confidence_threshold: float = Field(0.7, env="CONFIDENCE_THRESHOLD")
+    # Reflector fast-pass threshold. Calibrated for all-MiniLM-L6-v2 on academic
+    # text — good answers consistently score 0.50–0.65 with this embedder.
+    # Setting too high (e.g. 0.7) causes correct answers to be retried needlessly,
+    # and the retry often produces a shorter, worse answer.
+    confidence_threshold: float = Field(0.50, env="CONFIDENCE_THRESHOLD")
     retrieval_relevance_threshold: float = Field(0.2, env="RETRIEVAL_RELEVANCE_THRESHOLD")
     web_search_fallback_threshold: int = Field(2, env="WEB_SEARCH_FALLBACK_THRESHOLD")
 
@@ -48,6 +52,11 @@ class Settings(BaseSettings):
     # chunk reaches this cosine relevance. Below it (or a negative "not found" answer),
     # citations are suppressed and confidence is capped low — no false certainty.
     grounding_threshold: float = Field(0.30, env="GROUNDING_THRESHOLD")
+
+    # Minimum vector cosine score for a chunk to survive the retriever filter.
+    # Lower = keeps more chunks (better for non-academic docs like menus, reports).
+    # Higher = stricter cross-document contamination filtering.
+    min_vector_score: float = Field(0.10, env="MIN_VECTOR_SCORE")
 
     # Data
     data_dir: str = Field("/app/data", env="DATA_DIR")

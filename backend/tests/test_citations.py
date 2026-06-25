@@ -24,6 +24,10 @@ from agent.nodes.generator import (
     _extract_cited_ids,
     _remap_citation_groups,
     _is_negative_answer,
+    _clean_pdf_text,
+    _keywords,
+    _claim_for,
+    _evidence_snippet,
 )
 from evaluate.agentic import _keyword_recall
 
@@ -135,6 +139,116 @@ class TestExtractMeta:
         text = 'OK\n<<<JSON\n{"citations":[],"follow_up_questions":[],"confidence_score":0.85}\n>>>'
         meta, _ = _extract_meta(text)
         assert meta["confidence_score"] == 0.85
+
+    def test_truncated_json_block_still_splits(self):
+        """The production bug: the model ran out of tokens mid-JSON, so there is no
+        closing >>>. We can't parse the partial JSON, but the answer text MUST still
+        be cut at <<<JSON so the raw JSON never leaks into the chat."""
+        answer_part = "The answer is complete and ends here."
+        text = answer_part + '\n<<<JSON\n{"follow_up_questions":["q1?"],"confidence'
+        meta, pos = _extract_meta(text)
+        assert meta is None          # unparsable partial JSON
+        assert pos >= 0              # but a valid split position
+        assert text[:pos].strip() == answer_part
+
+    def test_truncated_json_never_leaks_marker(self):
+        """Whatever survives the split must not contain the <<<JSON sentinel."""
+        text = 'Real answer.\n<<<JSON\n{"follow_up_questions":["a?","b?"'
+        meta, pos = _extract_meta(text)
+        assert "<<<JSON" not in text[:pos]
+
+
+# ─── Evidence-centric snippet extraction ──────────────────────────────────
+
+class TestCleanPdfText:
+    def test_joins_line_break_hyphenation(self):
+        assert _clean_pdf_text("funda- mental") == "fundamental"
+        assert _clean_pdf_text("equa- tion") == "equation"
+
+    def test_preserves_real_compound_hyphens(self):
+        assert "fixed-weight" in _clean_pdf_text("a fixed-weight model")
+
+    def test_collapses_whitespace(self):
+        assert _clean_pdf_text("a   b\n\nc") == "a b c"
+
+    def test_symbol_font_equals(self):
+        """PyPDF2 emits /H11005 for = when PDF uses Symbol font (APA stats papers)."""
+        assert _clean_pdf_text("r /H11005 .58") == "r = .58"
+
+    def test_symbol_font_less_than(self):
+        """PyPDF2 emits /H11021 for < (p-value threshold in stats papers)."""
+        assert _clean_pdf_text("p /H11021 .001") == "p < .001"
+
+    def test_symbol_font_full_stat_line(self):
+        """Real text from Brown-Giving-PsychSci-2003.pdf after PyPDF2 extraction."""
+        raw = "r /H11005 .58, p /H11021 .001"
+        assert _clean_pdf_text(raw) == "r = .58, p < .001"
+
+    def test_unknown_codes_pass_through(self):
+        """Unknown /H codes are left untouched — don't silently corrupt text."""
+        assert "/H99999" in _clean_pdf_text("text /H99999 more")
+
+
+class TestClaimFor:
+    def test_isolates_citing_sentence(self):
+        answer = "Background sentence. OSM-PINN uses asymmetric loss [3]. Other fact [1]."
+        claim = _claim_for("3", answer, "the query")
+        assert "asymmetric loss" in claim
+        assert "Background sentence" not in claim
+        assert "Other fact" not in claim
+
+    def test_grouped_citation_matches(self):
+        answer = "It improves consistency [2, 3] greatly."
+        assert "improves consistency" in _claim_for("3", answer, "q")
+
+    def test_falls_back_to_query_when_no_citing_sentence(self):
+        assert _claim_for("9", "No citation here.", "fallback query") == "fallback query"
+
+
+class TestEvidenceSnippet:
+    CHUNK = (
+        "The introduction discusses predictive maintenance broadly. "
+        "OSM-PINN replaces symmetric penalties with asymmetric regularisation "
+        "targeting only physically implausible health recoveries. "
+        "It achieves a violation rate reduction from 3.62% to 2.06% across datasets. "
+        "Future work should validate on larger sample sizes."
+    )
+
+    def test_picks_passage_matching_claim(self):
+        claim = "asymmetric regularisation targeting implausible recoveries"
+        snip = _evidence_snippet(self.CHUNK, claim)
+        # The matched sentence must be the centre of the returned window.
+        assert "asymmetric regularisation" in snip
+
+    def test_unrelated_far_sentence_excluded(self):
+        """A sentence two hops from the best match is outside the ±1 window."""
+        claim = "asymmetric regularisation targeting implausible recoveries"
+        snip = _evidence_snippet(self.CHUNK, claim)
+        # "Future work" (sentence 4) is two sentences after the best match (2) → excluded.
+        assert "Future work" not in snip
+
+    def test_never_truncates_mid_word(self):
+        long_chunk = " ".join(f"Sentence number {i} with content here." for i in range(50))
+        snip = _evidence_snippet(long_chunk, "content", max_chars=120)
+        # Strip ellipsis markers, then the visible text must end cleanly.
+        core = snip.strip("… ")
+        assert not core.endswith(tuple("abcdefghijklmnopqrstuvwxyz")) or core.endswith(".")
+
+    def test_includes_neighbouring_context(self):
+        claim = "violation rate reduction"
+        snip = _evidence_snippet(self.CHUNK, claim)
+        # Best sentence is the 3.62%→2.06% one; a neighbour should be included too.
+        assert "2.06%" in snip
+        assert snip.count(".") >= 2  # more than one sentence of context
+
+    def test_empty_claim_returns_opening(self):
+        snip = _evidence_snippet(self.CHUNK, "")
+        assert "introduction" in snip.lower()
+
+    def test_respects_max_chars(self):
+        snip = _evidence_snippet(self.CHUNK, "violation", max_chars=80)
+        # Allow the ellipsis markers a little slack beyond the hard sentence cap.
+        assert len(snip) <= 80 + 4
 
 
 # ─── _extract_cited_ids (grouped citation parser) ──────────────────────────

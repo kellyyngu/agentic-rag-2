@@ -20,8 +20,11 @@ function CitationCard({ citation }: { citation: Citation }) {
   const [expanded, setExpanded] = useState(false)
   const barWidth = Math.max(Math.round(citation.relevance_score * 100), 10)
   const { label, color } = relevanceLabel(citation.relevance_score)
-  const preview = citation.excerpt.slice(0, 160)
   const hasMore = citation.excerpt.length > 160
+  // Break the preview on a word boundary so it never cuts mid-word.
+  const preview = hasMore
+    ? citation.excerpt.slice(0, 160).replace(/\s+\S*$/, '')
+    : citation.excerpt
 
   return (
     <div

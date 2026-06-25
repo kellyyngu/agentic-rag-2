@@ -78,9 +78,10 @@ class _Settings:
     llm_model: str = "gemini-2.0-flash"
     safe_fail_threshold: float = 0.15
     grounding_threshold: float = 0.30
+    min_vector_score: float = 0.10
     web_search_fallback_threshold: int = 2
     max_reflection_iterations: int = 2
-    confidence_threshold: float = 0.7
+    confidence_threshold: float = 0.50
     retrieval_relevance_threshold: float = 0.2
     orchestrator_max_iterations: int = 3
     orchestrator_quality_threshold: float = 0.30
