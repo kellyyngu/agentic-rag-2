@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     retrieval_relevance_threshold: float = Field(0.2, env="RETRIEVAL_RELEVANCE_THRESHOLD")
     web_search_fallback_threshold: int = Field(2, env="WEB_SEARCH_FALLBACK_THRESHOLD")
 
+    # Orchestrator (ReAct tool loop)
+    orchestrator_max_iterations: int = Field(3, env="ORCHESTRATOR_MAX_ITERATIONS")
+    orchestrator_quality_threshold: float = Field(0.30, env="ORCHESTRATOR_QUALITY_THRESHOLD")
+
+    # Safe-fail gate: refuse rather than answer when retrieval is this weak AND no web evidence.
+    # Kept conservative so valid low-cosine meta/summary queries are not wrongly refused.
+    safe_fail_threshold: float = Field(0.15, env="SAFE_FAIL_THRESHOLD")
+
     # Data
     data_dir: str = Field("/app/data", env="DATA_DIR")
 

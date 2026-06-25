@@ -23,9 +23,19 @@ def _route_after_intent(state: AgentState) -> str:
 
 
 def _route_after_orchestrator(state: AgentState) -> str:
-    """If orchestrator found nothing and downgraded intent, answer from LLM directly."""
+    """Route after the tool loop.
+
+    1. Nothing found → downgraded to general_knowledge → answer from LLM knowledge.
+    2. Safe-fail gate: retrieval is weak AND no web evidence → refuse instead of
+       sending barely-relevant chunks to the generator (prevents hallucination).
+    3. Otherwise → generate.
+    """
     if state.get("intent") == "general_knowledge":
         return "direct"
+    conf = state.get("retrieval_confidence", 0.0)
+    has_web = bool(state.get("web_search_results"))
+    if conf < settings.safe_fail_threshold and not has_web:
+        return "safe_fail"
     return "generate"
 
 
@@ -75,6 +85,30 @@ def build_graph(retriever_service: Any) -> Any:
     async def reflector_node(state: AgentState) -> AgentState:
         return await reflector.run(state)
 
+    async def safe_fail_node(state: AgentState) -> AgentState:
+        """Production-safe fallback: weak retrieval + no web → refuse, skip the generator."""
+        msg = (
+            "I couldn't find enough relevant information in the uploaded documents to "
+            "answer this confidently, and no web results were available. Try rephrasing "
+            "the question or adding more detail."
+        )
+        state["answer"] = msg
+        state["citations"] = []
+        state["follow_up_questions"] = []
+        state["confidence_score"] = 0.0
+        state["reflection_passed"] = True  # terminal — no reflection retry
+        state["trace"]["safe_fail"] = {
+            "triggered": True,
+            "retrieval_confidence": round(state.get("retrieval_confidence", 0.0), 3),
+            "reason": "low_confidence_no_web",
+        }
+        q = state.get("stream_queue")
+        if q:
+            await q.put({"event": "answer", "data": {"text": msg}})
+            await q.put({"event": "citations", "data": {"citations": []}})
+            await q.put({"event": "follow_ups", "data": {"questions": []}})
+        return state
+
     workflow = StateGraph(AgentState)
     workflow.add_node("router",       router_node)
     workflow.add_node("direct",       direct_node)
@@ -83,6 +117,7 @@ def build_graph(retriever_service: Any) -> Any:
     workflow.add_node("web_search",   web_search_node)
     workflow.add_node("generator",    generator_node)
     workflow.add_node("reflector",    reflector_node)
+    workflow.add_node("safe_fail",    safe_fail_node)
 
     workflow.set_entry_point("router")
 
@@ -94,12 +129,13 @@ def build_graph(retriever_service: Any) -> Any:
     )
     workflow.add_edge("direct", END)
 
-    # After orchestrator: if nothing found, downgraded to general_knowledge → direct
+    # After orchestrator: nothing found → direct; weak+no-web → safe_fail; else → generate
     workflow.add_conditional_edges(
         "orchestrator",
         _route_after_orchestrator,
-        {"direct": "direct", "generate": "generator"},
+        {"direct": "direct", "generate": "generator", "safe_fail": "safe_fail"},
     )
+    workflow.add_edge("safe_fail", END)
 
     # Reflector retry loop (unchanged): poor answer → re-retrieve → re-generate
     workflow.add_conditional_edges(

@@ -22,8 +22,9 @@ from config import settings
 
 _client = genai.Client(api_key=settings.gemini_api_key)
 
-MAX_ITERATIONS = 3
-QUALITY_THRESHOLD = 0.30  # calibrated to all-MiniLM-L6-v2 cosine range (was 0.40)
+# MAX_ITERATIONS and QUALITY_THRESHOLD now live in config.py (env-configurable):
+#   settings.orchestrator_max_iterations     (default 3)
+#   settings.orchestrator_quality_threshold  (default 0.30, calibrated to MiniLM cosine)
 MIN_GOOD_CHUNKS = 3       # stop early once we have this many high-quality chunks
 
 # ─────────────────────────────────────────────────────────────
@@ -91,7 +92,7 @@ Rules:
 async def run(state: AgentState, retriever_service: Any) -> AgentState:
     """
     LLM-driven ReAct loop. Populates retrieved_chunks + web_search_results.
-    Exits when the LLM stops calling tools or MAX_ITERATIONS is reached.
+    Exits when the LLM stops calling tools or orchestrator_max_iterations is reached.
     """
     t0 = time.time()
     q_stream = state.get("stream_queue")
@@ -116,7 +117,7 @@ async def run(state: AgentState, retriever_service: Any) -> AgentState:
     call_log:           list[dict]           = []
     call_signatures:    set[str]             = set()  # loop-guard: same call twice → break
 
-    for iteration in range(MAX_ITERATIONS):
+    for iteration in range(settings.orchestrator_max_iterations):
         logger.info(
             f"[orchestrator] iter={iteration} "
             f"chunks={len(accumulated_chunks)} web={len(accumulated_web)}"
@@ -221,11 +222,14 @@ async def run(state: AgentState, retriever_service: Any) -> AgentState:
             contents.append(types.Content(role="user", parts=result_parts))
 
         # ── Early exit: sufficient good chunks ──────────────────────────────
-        good_chunks = [c for c in accumulated_chunks if c.vector_score >= QUALITY_THRESHOLD]
+        good_chunks = [
+            c for c in accumulated_chunks
+            if c.vector_score >= settings.orchestrator_quality_threshold
+        ]
         if len(good_chunks) >= MIN_GOOD_CHUNKS:
             logger.info(
-                f"[orchestrator] {len(good_chunks)} good chunks (≥{QUALITY_THRESHOLD:.0%}) — "
-                "stopping early"
+                f"[orchestrator] {len(good_chunks)} good chunks "
+                f"(≥{settings.orchestrator_quality_threshold:.0%}) — stopping early"
             )
             break
 
@@ -301,7 +305,7 @@ async def _exec_retrieve(
         }
 
     avg_score = sum(c.vector_score for c in new) / len(new)
-    quality   = "GOOD" if avg_score >= QUALITY_THRESHOLD else "WEAK"
+    quality   = "GOOD" if avg_score >= settings.orchestrator_quality_threshold else "WEAK"
     sources   = list({c.source for c in new})
 
     return {

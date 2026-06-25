@@ -6,10 +6,9 @@ Usage (inside the backend container, where Qdrant is reachable):
     docker compose exec backend python -m evaluate.run_all
     docker compose exec backend python -m evaluate.run_all --suite functional
     docker compose exec backend python -m evaluate.run_all --suite agentic
-    docker compose exec backend python -m evaluate.run_all --suite ragas
 
-Runs the functional harness, agentic metrics, and RAGAS pipeline, then prints a
-consolidated report. All artifacts are written to evaluate/results/.
+Runs the functional harness and agentic metrics, then prints a consolidated
+report. All artifacts are written to evaluate/results/.
 """
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ from loguru import logger
 from evaluate.services import EvalServices
 from evaluate.functional import run_functional_suite
 from evaluate.agentic import run_agentic_suite
-from evaluate.ragas_eval import run_ragas_suite
 
 _HERE = Path(__file__).parent
 _BENCHMARK = _HERE / "datasets" / "benchmark_dataset.json"
@@ -57,10 +55,6 @@ async def main(suite: str) -> None:
         items = _load_benchmark_items()
         reports["agentic"] = await run_agentic_suite(items, retriever, cm)
 
-    if suite in ("all", "ragas"):
-        _print_header("RAGAS QUANTITATIVE SUITE")
-        reports["ragas"] = await run_ragas_suite(retriever, cm)
-
     # ── Consolidated console report ─────────────────────────────────────────
     _print_header("CONSOLIDATED REPORT")
 
@@ -85,15 +79,6 @@ async def main(suite: str) -> None:
         rc = a.get("retrieval_confidence", {})
         print(f"   Retrieval confidence (mean)    {rc.get('mean')}  (min={rc.get('min')}, max={rc.get('max')})")
 
-    if "ragas" in reports:
-        r = reports["ragas"]
-        print("\nRAGAS answer-quality metrics:")
-        if r.get("status") == "completed" and "aggregate" in r:
-            for metric, val in r["aggregate"].items():
-                print(f"   {metric:32s} {val}")
-        else:
-            print(f"   {r.get('status', 'unknown')}: {r.get('reason') or r.get('error', '')}")
-
     print(f"\nArtifacts written to: {_RESULTS_DIR}\n")
 
 
@@ -104,7 +89,7 @@ def _pct(v) -> str:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agentic RAG evaluation suite")
     parser.add_argument(
-        "--suite", choices=["all", "functional", "agentic", "ragas"],
+        "--suite", choices=["all", "functional", "agentic"],
         default="all", help="Which suite to run (default: all)",
     )
     args = parser.parse_args()

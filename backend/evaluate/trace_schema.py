@@ -82,7 +82,7 @@ class EvalTrace:
 
     @property
     def context_texts(self) -> list[str]:
-        """Full chunk contents — used as RAGAS `retrieved_contexts`."""
+        """Full chunk contents of the retrieved context."""
         return [c.get("content", "") for c in self.retrieved_chunks if c.get("content")]
 
     def inline_citation_ids(self) -> list[str]:

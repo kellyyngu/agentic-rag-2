@@ -172,8 +172,8 @@ async def run(state: AgentState) -> AgentState:
     chunks = state.get("retrieved_chunks", [])
     chunk_map = {str(i + 1): chunk for i, chunk in enumerate(chunks)}
 
-    # Pre-build local→global ID mapping using the CitationManager singleton.
-    # This is the only place IDs are assigned — all queries share the same counter.
+    # Pre-build local→global ID mapping using the per-session CitationManager.
+    # This is the only place IDs are assigned — all turns in a session share its counter.
     manager = state.get("citation_manager")
     local_to_global: dict[str, str] = {}
     for local_id, chunk in chunk_map.items():

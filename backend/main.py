@@ -10,7 +10,6 @@ from retrieval.vector_store import VectorStore
 from retrieval.bm25_index import BM25Index
 from retrieval.hybrid_retriever import HybridRetriever
 from retrieval.reranker import Reranker
-from agent.citation_manager import CitationManager
 
 
 logger.remove()
@@ -33,7 +32,11 @@ async def lifespan(app: FastAPI):
         bm25_index=app.state.bm25_index,
         reranker=app.state.reranker,
     )
-    app.state.citation_manager = CitationManager()
+    # Per-session citation registries (session_id → CitationManager).
+    # Replaces the old process-global singleton so concurrent users never share
+    # or collide on citation IDs. Sessions without an id get a fresh per-request
+    # manager in the chat handler (full isolation).
+    app.state.citation_managers = {}
     logger.info("All services ready.")
     yield
     logger.info("Shutting down.")

@@ -1,8 +1,8 @@
 """
-Agentic metrics — the key differentiator from RAGAS.
+Agentic metrics — decision-quality scoring.
 
-RAGAS scores the final ANSWER. These metrics score the agent's DECISION PROCESS,
-computed entirely from execution traces (EvalTrace):
+Where answer-quality metrics score the final ANSWER, these score the agent's
+DECISION PROCESS, computed entirely from execution traces (EvalTrace):
 
   * Tool Selection Accuracy        - did the first tool match the expected tool?
   * Query Reformulation Success    - of WEAK retrievals, how many recovered to GOOD?

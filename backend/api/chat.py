@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from loguru import logger
 
 from agent.graph import run_agent
+from agent.citation_manager import CitationManager
 
 router = APIRouter()
 
@@ -19,6 +20,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     conversation_history: List[Message] = []
+    session_id: Optional[str] = None
     debug: bool = False
 
 
@@ -45,7 +47,18 @@ async def chat(request: Request, body: ChatRequest):
         raise HTTPException(503, "Retriever not initialized")
 
     history = [m.model_dump() for m in body.conversation_history]
-    citation_manager = getattr(request.app.state, "citation_manager", None)
+
+    # Per-session citation manager: reuse one per session_id so the same chunk keeps
+    # a stable citation ID across turns; with no session_id, isolate per request.
+    # No cross-user shared state.
+    managers = getattr(request.app.state, "citation_managers", None)
+    if body.session_id and managers is not None:
+        citation_manager = managers.get(body.session_id)
+        if citation_manager is None:
+            citation_manager = CitationManager()
+            managers[body.session_id] = citation_manager
+    else:
+        citation_manager = CitationManager()
 
     return StreamingResponse(
         _event_stream(body.query, history, retriever, citation_manager),

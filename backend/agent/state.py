@@ -76,4 +76,4 @@ class AgentState(TypedDict):
     # Observability
     trace: Dict[str, Any]
     stream_queue: Optional[Any]       # asyncio.Queue for SSE events
-    citation_manager: Optional[Any]   # CitationManager singleton from app.state
+    citation_manager: Optional[Any]   # per-session CitationManager (scoped by session_id)
