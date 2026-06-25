@@ -2,48 +2,25 @@ import json
 import re
 import time
 import asyncio
-from typing import Any
 from google import genai
 from google.genai import types
 from loguru import logger
 
 from config import settings
 from agent.state import AgentState, Citation, RetrievedChunk
+from agent.nodes.generator_prompts import GENERATOR_SYSTEM, GENERATOR_PROMPT
+from agent.nodes.evidence import _evidence_snippet, _claim_for
+from agent.nodes.citation_logic import (
+    _is_negative_answer,
+    _extract_cited_ids,
+    _remap_citation_groups,
+)
+
+# Re-export private helpers consumed by test_citations.py so import paths stay stable.
+from agent.nodes.evidence import _clean_pdf_text, _keywords
+from agent.nodes.citation_logic import _NEGATIVE_MARKERS
 
 _client = genai.Client(api_key=settings.gemini_api_key)
-
-GENERATOR_SYSTEM = """You are an expert AI assistant that answers questions using the provided context.
-
-RULES:
-1. Answer ONLY from the provided context. If context is insufficient, say so clearly.
-2. Cite sources inline using ONLY the bracketed source numbers shown in the CONTEXT
-   (the [1], [2], ... that label each context block). Group multiple sources as [1, 3].
-   NEVER reproduce reference numbers that appear *inside* the source text itself
-   (e.g. a paper's own bibliography markers like "[7]") — only the context labels.
-3. If partial information is available, provide what you know and indicate gaps.
-4. Keep answers concise: 150–400 words for most questions. Only go longer if the user
-   explicitly asks for a detailed summary or comparison.
-5. Use markdown structure only when the answer has multiple distinct sections.
-6. METADATA — output this block ONLY AFTER your answer text is 100% complete.
-   Every sentence in your answer must be finished before you write <<<JSON.
-   Format (one line of JSON, no backticks, no excerpts):
-   <<<JSON
-   {"follow_up_questions":["q1?","q2?","q3?"],"confidence_score":0.0}
-   >>>"""
-
-GENERATOR_PROMPT = """CONTEXT:
-{context}
-
-WEB SEARCH RESULTS (supplementary):
-{web_results}
-
-CONVERSATION HISTORY:
-{history}
-
-USER QUERY: {query}
-
-Write a complete, grounded answer with inline citations [1], [2], etc.
-Finish every sentence before outputting the <<<JSON metadata block."""
 
 
 def _sanitize_json(s: str) -> str:
@@ -54,7 +31,6 @@ def _sanitize_json(s: str) -> str:
     while i < len(s):
         c = s[i]
         if c == '\\' and in_string:
-            # Already-escaped sequence — keep both chars as-is
             result.append(c)
             if i + 1 < len(s):
                 result.append(s[i + 1])
@@ -134,167 +110,6 @@ def _build_web_context(results: list[dict]) -> str:
     return "\n".join(f"- {r['title']}: {r['body'][:300]}" for r in results[:3])
 
 
-# Phrases that signal the answer is a "not found" / information-absence reply.
-# Deliberately about *missing information*, not about content (so "OSM-PINN does not
-# use symmetric penalties" — a substantive claim — does NOT match).
-_NEGATIVE_MARKERS = (
-    "does not mention", "doesn't mention", "not mentioned", "no mention of",
-    "does not discuss", "doesn't discuss", "does not contain", "doesn't contain",
-    "does not provide", "doesn't provide", "does not specify", "doesn't specify",
-    "does not appear", "doesn't appear", "not appear in",
-    "no information", "no relevant information", "could not find", "couldn't find",
-    "not found in", "is not mentioned", "isn't mentioned", "not contain any",
-    "i cannot provide", "i can't provide", "i could not find", "unable to find",
-    "context does not", "context doesn't", "documents do not", "documents don't",
-)
-
-
-def _is_negative_answer(answer: str) -> bool:
-    """True when the answer is an information-absence reply ("X is not mentioned").
-
-    Such answers must not carry citations or high confidence — the cited chunks
-    do not *support* the claim, they merely failed to contain the requested fact.
-    """
-    low = answer.lower()
-    return any(marker in low for marker in _NEGATIVE_MARKERS)
-
-
-def _extract_cited_ids(answer: str, valid_ids: set[str]) -> list[str]:
-    """Return the ordered, de-duplicated chunk indices the answer actually cites.
-
-    Handles grouped citations — [3], [2, 4], [2, 4, 6] are all parsed. Any bracketed
-    number that is NOT a real retrieved-chunk index is ignored (academic papers embed
-    their own bibliography markers like "[7]" in the body text, which must never
-    become citations). Returns indices sorted ascending by value.
-    """
-    out: list[str] = []
-    for group in re.findall(r'\[([\d,\s]+)\]', answer):
-        for num in re.findall(r'\d+', group):
-            if num in valid_ids and num not in out:
-                out.append(num)
-    out.sort(key=int)
-    return out
-
-
-def _remap_citation_groups(answer: str, local_to_global: dict[str, str]) -> str:
-    """Rewrite every [N] / [N, M, ...] group from local context indices to global IDs.
-
-    Numbers that don't map to a retrieved chunk (the source's own references) are
-    dropped from the group. A single regex pass with a replacement function avoids
-    the partial-replacement bug where rewriting [1] before [10] corrupts "[10]".
-    """
-    def _sub(match: re.Match) -> str:
-        mapped: list[str] = []
-        for num in re.findall(r'\d+', match.group(1)):
-            g = local_to_global.get(num)
-            if g and g not in mapped:
-                mapped.append(g)
-        return "[" + ", ".join(mapped) + "]" if mapped else ""
-
-    return re.sub(r'\[([\d,\s]+)\]', _sub, answer)
-
-
-# ── Evidence-centric snippet extraction ────────────────────────────────────
-# When a source is cited, the card should show the passage of that chunk most
-# relevant to the cited claim — not just the chunk's opening 500 chars. This is
-# deterministic and LLM-free (keyword overlap), consistent with the project's
-# other scoring heuristics, and adds no latency or model calls.
-
-_SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-Z(0-9])')
-
-# Small stopword set so overlap scoring keys on meaningful terms, not filler.
-_STOPWORDS = frozenset("""
-a an the and or but of to in on at for with from by as is are was were be been
-this that these those it its their they them which who what when where how why
-we our you your i me my be can could would should may might will not no
-into than then over under such only also more most other some any each both
-""".split())
-
-
-# PyPDF2 Symbol-font glyph codes → readable characters.
-# These appear when a PDF embeds math/symbol characters in a non-standard font
-# that PyPDF2 cannot decode (e.g. APA-style stats: r = .58, p < .001).
-_PDF_SYMBOL_MAP: dict[str, str] = {
-    '/H11005': '=',   # equals sign
-    '/H11021': '<',   # less than
-    '/H11022': '>',   # greater than
-    '/H11349': '±',   # plus-minus
-    '/H11011': '−',   # minus (en-dash)
-    '/H11015': '≈',   # approximately equal
-    '/H11003': '×',   # multiplication
-    '/H11001': '+',   # plus (sometimes encoded)
-    '/H11002': '−',   # minus (alternate)
-    '/H11032': '′',   # prime
-    '/H11018': '≤',   # less-than-or-equal
-    '/H11019': '≥',   # greater-than-or-equal
-    '/H9251':  'α',   # alpha
-    '/H9252':  'β',   # beta
-    '/H9254':  'δ',   # delta
-    '/H9262':  'μ',   # mu
-    '/H9268':  'σ',   # sigma
-    '/H9273':  'χ',   # chi
-    '/H9274':  'ψ',   # psi
-}
-# Compiled once — matches any known glyph code surrounded by word boundaries.
-_PDF_SYMBOL_RE = re.compile(
-    '|'.join(re.escape(k) for k in _PDF_SYMBOL_MAP),
-)
-
-
-def _clean_pdf_text(text: str) -> str:
-    """Repair PDF extraction artifacts for readable display.
-
-    Replaces Symbol-font glyph codes (e.g. /H11005 → =, /H11021 → <) that
-    PyPDF2 emits when it cannot decode embedded math fonts. Also joins
-    line-break hyphenation ("funda- mental" → "fundamental") while keeping
-    real compound hyphens ("fixed-weight"), then collapses whitespace.
-    """
-    text = _PDF_SYMBOL_RE.sub(lambda m: _PDF_SYMBOL_MAP[m.group(0)], text)
-    text = re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
-    return re.sub(r'\s+', ' ', text).strip()
-
-
-def _keywords(text: str) -> set[str]:
-    return {w for w in re.findall(r'[a-z]+', text.lower()) if len(w) > 2 and w not in _STOPWORDS}
-
-
-def _claim_for(local_id: str, answer: str, query: str) -> str:
-    """The text a citation should be matched against: the answer sentence(s) that
-    cite this source. Falls back to the user query if none can be isolated."""
-    citing = []
-    for sent in re.split(r'(?<=[.!?])\s+', answer):
-        if any(local_id in re.findall(r'\d+', g) for g in re.findall(r'\[([\d,\s]+)\]', sent)):
-            citing.append(sent)
-    return " ".join(citing).strip() or query
-
-
-def _evidence_snippet(content: str, claim: str, max_chars: int = 600) -> str:
-    """Return the passage of `content` most relevant to `claim`, with neighbouring
-    context — picked by keyword overlap, trimmed to whole sentences (never mid-word).
-    """
-    clean = _clean_pdf_text(content)
-    sentences = [s.strip() for s in _SENT_SPLIT.split(clean) if s.strip()]
-    if not sentences:
-        return clean[:max_chars]
-
-    kw = _keywords(claim)
-    scores = [len(kw & _keywords(s)) for s in sentences] if kw else [0] * len(sentences)
-    best = max(range(len(sentences)), key=lambda i: scores[i]) if any(scores) else 0
-
-    # Window: best sentence plus one neighbour on each side (1–3 sentences).
-    lo, hi = max(0, best - 1), min(len(sentences), best + 2)
-    snippet = " ".join(sentences[lo:hi]).strip()
-
-    if len(snippet) > max_chars:
-        cut = snippet[:max_chars]
-        boundary = max(cut.rfind('. '), cut.rfind('! '), cut.rfind('? '))
-        snippet = (cut[:boundary + 1] if boundary > max_chars // 2 else cut.rsplit(' ', 1)[0]).strip()
-
-    prefix = "… " if lo > 0 else ""
-    suffix = " …" if hi < len(sentences) else ""
-    return f"{prefix}{snippet}{suffix}".strip()
-
-
 # ── Post-generation pipeline (pure, independently testable) ─────────────────
 # These are extracted from run() so the confidence policy can be unit-tested
 # without driving a token stream. Behaviour is identical to the inline version.
@@ -360,7 +175,6 @@ def build_citations(
             ))
             seen_global.add(global_id)
 
-    # Rewrite inline [N] / [N, M] references to global IDs in a single pass.
     answer = _remap_citation_groups(answer, local_to_global)
     return citations, answer
 
@@ -389,20 +203,14 @@ def calibrate_confidence(
     is_grounded    = (top_cited >= settings.grounding_threshold or has_web) and not is_negative
 
     if not is_grounded:
-        # Weak / negative / off-topic answer: drop the misleading citations and the
-        # now-dangling inline markers, and report low, honest confidence.
         citations = []
         answer = re.sub(r'\s*\[[\d,\s]+\]', '', answer).strip()
         confidence = round(min(settings.confidence_ungrounded_cap, retrieval_conf), 3)
     elif has_web and not citations:
-        # Web-grounded answer (no document citations). Base confidence on the LLM's
-        # self-rating with a floor — we DID retrieve live results to ground it.
         confidence = max(0.0, min(1.0, round(
             settings.confidence_web_base + llm_score * settings.confidence_web_llm_weight, 3
         )))
     else:
-        # Document-grounded answer: blend LLM self-rating, retrieval relevance, and
-        # citation coverage.
         citation_support = min(len(citations) / max(num_chunks, 1), 1.0)
         confidence = max(0.0, min(1.0, round(
             llm_score * settings.confidence_doc_llm_weight
@@ -443,8 +251,8 @@ async def run(state: AgentState) -> AgentState:
     # marker split across two chunks (e.g. "<<" then "<JSON") is never leaked.
     _SENTINEL = "<<<JSON"
     _KEEP = len(_SENTINEL) - 1
-    pending = ""          # not-yet-emitted text (may hold a partial sentinel)
-    stopped_emit = False  # once the sentinel is seen, never emit again
+    pending = ""
+    stopped_emit = False
 
     try:
         response = _client.models.generate_content_stream(
@@ -452,10 +260,6 @@ async def run(state: AgentState) -> AgentState:
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=GENERATOR_SYSTEM,
-                # 2048 tokens gives room for complex multi-part questions (e.g.
-                # "compare all three models and their trade-offs") without truncation.
-                # Sentinel-stop keeps the JSON metadata invisible in the live stream.
-                # Prompt instruction keeps simple answers under 400 words.
                 max_output_tokens=2048,
                 temperature=0.1,
             ),
@@ -469,45 +273,35 @@ async def run(state: AgentState) -> AgentState:
             pending += chunk.text
             idx = pending.find(_SENTINEL)
             if idx != -1:
-                # Sentinel reached — emit everything before it, then go silent.
                 visible = pending[:idx]
                 if visible:
                     await q_stream.put({"event": "token", "data": {"text": visible}})
                 stopped_emit = True
                 pending = ""
             elif len(pending) > _KEEP:
-                # Emit all but a short tail that might be the start of the sentinel.
                 await q_stream.put({"event": "token", "data": {"text": pending[:-_KEEP]}})
                 pending = pending[-_KEEP:]
-        # No sentinel ever appeared — flush whatever is left.
         if q_stream and not stopped_emit and pending:
             await q_stream.put({"event": "token", "data": {"text": pending}})
     except Exception as e:
         logger.error(f"[generator] streaming failed: {e}")
         full_text = f"I encountered an error generating the response: {e}"
 
-    # --- Step 1: parse the streamed text into answer + metadata ---
     answer, follow_ups, llm_score = parse_generation(full_text)
 
-    # Build a lookup from 1-based citation index → actual retrieved chunk.
-    # This index is canonical: it matches the [N] numbers given to the LLM in the context.
     chunks = state.get("retrieved_chunks", [])
     chunk_map = {str(i + 1): chunk for i, chunk in enumerate(chunks)}
 
-    # Pre-build local→global ID mapping using the per-session CitationManager.
-    # This is the only place IDs are assigned — all turns in a session share its counter.
     manager = state.get("citation_manager")
     local_to_global: dict[str, str] = {}
     for local_id, chunk in chunk_map.items():
         if manager:
             local_to_global[local_id] = manager.get_or_assign(chunk.chunk_id)
         else:
-            local_to_global[local_id] = local_id  # graceful fallback
+            local_to_global[local_id] = local_id
 
-    # --- Step 2: build citations from inline [N] references and remap to global IDs ---
     citations, answer = build_citations(answer, chunk_map, local_to_global, state["query"])
 
-    # --- Step 3: grounding-aware confidence + citation calibration ---
     citations, answer, confidence = calibrate_confidence(
         answer=answer,
         citations=citations,
@@ -532,8 +326,6 @@ async def run(state: AgentState) -> AgentState:
     }
 
     if q_stream:
-        # Send the clean answer (JSON block stripped) so the frontend replaces
-        # the raw streamed content which may include the trailing JSON metadata.
         await q_stream.put({
             "event": "answer",
             "data": {"text": answer},

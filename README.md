@@ -224,7 +224,8 @@ off-topic cross-document contamination.
 ## 6. Citation & Grounding System
 
 Every factual sentence in an answer carries an inline `[N]` marker that resolves to a real
-retrieved chunk (`backend/agent/nodes/generator.py`):
+retrieved chunk (logic split across `backend/agent/nodes/citation_logic.py`,
+`backend/agent/nodes/evidence.py`, and `backend/agent/nodes/generator.py`):
 
 1. The generator is shown context numbered `[1]…[k]` and instructed to cite inline.
 2. Local `[N]` markers are remapped to **session-stable global IDs** via a per-session
@@ -248,7 +249,7 @@ if the top cited chunk's vector score is below this threshold, citations are als
 — the answer is not grounded well enough to warrant them.
 
 **Evidence-centric snippets:** each citation card in the UI shows a passage selected from
-the chunk by `_evidence_snippet`, which:
+the chunk by `_evidence_snippet` (`evidence.py`), which:
 1. Tokenises the chunk into sentences.
 2. Scores each sentence by keyword overlap with the *claiming sentence* from the answer
    (identified by `_claim_for`).
@@ -292,7 +293,8 @@ parses the metadata with a three-tier fallback: `<<<JSON…>>>` delimiters, fenc
 `<<<JSON` blocks (model ran out of token budget mid-JSON) — `split_pos` is still returned
 so the partial block is stripped before the answer is stored.
 
-Generator settings: `max_output_tokens=2048`, `temperature=0.1`.
+Generator settings: `max_output_tokens=2048`, `temperature=0.1`. The system and user prompt
+templates live in `backend/agent/nodes/generator_prompts.py`.
 
 ---
 
@@ -402,7 +404,7 @@ some live, some adversarial) and **confident-but-wrong answers are expensive**.
 | Grounding threshold | `grounding_threshold = 0.30` | Citations suppressed below this cosine — only assert grounding when evidence is meaningful. |
 | Confidence threshold | `confidence_threshold = 0.50` | Calibrated for all-MiniLM-L6-v2 on academic text (0.50–0.65 range); naive 0.70 causes correct answers to be retried and worsened. |
 | Config | All thresholds/iterations in `config.py` (env-overridable) | Operators tune without code changes. |
-| Citations | Per-session manager | Multi-user safe vs unbounded session map growth over a long-lived process (acceptable for the demo; would add TTL eviction in production). |
+| Citations | Per-session manager | Multi-user safe. Session map is bounded by `LRUCache(max_session_cache)` — LRU eviction prevents unbounded growth. |
 
 ---
 
@@ -459,7 +461,7 @@ npm install && npm run dev                                          # :5173
 Quality assurance is layered across three tiers, and deliberately **not** dependent on a
 single LLM judge.
 
-### 13.1 Unit tests — 182 tests, 5 files
+### 13.1 Unit tests — 219 tests, 9 files
 
 ```
 backend/tests/
@@ -469,7 +471,11 @@ backend/tests/
 ├── test_citations.py    — citation pipeline: CitationManager, _extract_meta (3-tier fallback + truncation),
 │                          _remap_citation_groups, _is_negative_answer (grounding gate),
 │                          _clean_pdf_text (PDF symbol fonts), _evidence_snippet, _keyword_recall
-└── test_trajectories.py — 7 multi-step trajectory tests (see §13.2)
+├── test_trajectories.py — 7 multi-step trajectory tests (see §13.2)
+├── test_vector_store.py — _point_id() determinism, restart-stability, Qdrant uint63 range
+├── test_hybrid_async.py — async retrieval correctness, off-loop dispatch, score preservation
+├── test_confidence.py   — parse_generation, build_citations, calibrate_confidence; config weight respect
+└── test_bounded_cache.py — LRU eviction, recency refresh, thread safety, cap under load
 ```
 
 Key coverage areas per file:
@@ -545,8 +551,10 @@ the numbers you defend in a demo or report.
   retrieval improvement available.
 - **No query decomposition.** Compound multi-hop questions are handled by in-loop
   reformulation, not explicit sub-query planning with per-sub-query evidence tracking.
-- **Citation manager growth.** The per-session map is unbounded over a long-lived process;
-  production would add TTL/LRU eviction.
+- **Citation manager TTL.** The per-session `LRUCache` evicts the least-recently-used session
+  past the cap (`max_session_cache=1000`); a returning evicted session simply restarts its
+  citation counter from 1. Production would add explicit TTL expiry to evict stale sessions
+  proactively rather than on overflow.
 - **No persistent trace store.** Execution traces stream to the UI and stdout but are not
   persisted behind a `GET /trace/{id}` API for post-hoc debugging.
 - **Latency.** P95 ≈ 22–26 s under multi-tool, multi-iteration paths — acceptable for an
