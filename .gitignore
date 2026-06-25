@@ -11,3 +11,4 @@ dist/
 data/
 evaluation/results.json
 .pytest_cache/
+.claude/
