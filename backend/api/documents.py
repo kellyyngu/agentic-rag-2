@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from typing import List
@@ -50,7 +51,7 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
             raise HTTPException(422, "No text could be extracted from the file")
 
         await vector_store.upsert(chunks)
-        bm25_index.add(chunks)
+        await asyncio.to_thread(bm25_index.add, chunks)
 
         logger.info(f"[documents] uploaded {file.filename}: {len(chunks)} chunks")
         return IngestResponse(chunks_added=len(chunks), source=file.filename or "")
@@ -73,7 +74,7 @@ async def ingest_text(request: Request, body: IngestTextRequest):
         raise HTTPException(422, "Text is empty or too short")
 
     await vector_store.upsert(chunks)
-    bm25_index.add(chunks)
+    await asyncio.to_thread(bm25_index.add, chunks)
 
     logger.info(f"[documents] ingested text '{body.source}': {len(chunks)} chunks")
     return IngestResponse(chunks_added=len(chunks), source=body.source)

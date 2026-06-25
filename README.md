@@ -10,42 +10,6 @@ CrossEncoder reranker · Tavily · React + Vite (SSE streaming) · Docker Compos
 
 ---
 
-## README Audit Report
-
-*Produced by auditing the codebase against this document — kept here for transparency.*
-
-### Missing from previous version
-
-1. **Trajectory / integration test suite** — 7 multi-step scenario tests drive real node
-   functions with only external boundaries mocked; recorded node-path assertions protect
-   against inter-node interaction bugs invisible to unit tests.
-2. **Unit test inventory** — 5 test files, 182 tests total; previous Section 12 only
-   described the evaluation harness.
-3. **Grounding gate** (`_is_negative_answer`) — detects "not found" answers, suppresses all
-   citations, and caps `confidence_score ≤ 0.25` regardless of the LLM's self-rating.
-4. **Confidence threshold calibration** — `confidence_threshold = 0.50` (not naive 0.70);
-   calibrated for `all-MiniLM-L6-v2` on academic text, where correct answers score 0.50–0.65.
-5. **PDF symbol font decoding** — `_clean_pdf_text` maps PyPDF2 glyph codes
-   (`/H11005 → =`, `/H11021 → <`, etc.) so citation snippets are human-readable.
-6. **Evidence-centric snippet extraction** — `_evidence_snippet` selects the most relevant
-   passage per citation using keyword overlap scoring, not a blind first-500-chars truncation.
-7. **Generator sentinel-stop streaming** — the `<<<JSON` marker halts token emission to the
-   SSE stream; the JSON metadata block is parsed server-side and never shown in the chat.
-8. **`grounding_threshold`** (0.30, separate from `safe_fail_threshold` 0.15) — controls
-   when the generator includes citations vs suppresses them.
-9. **Web-guard in `_should_continue`** — a failed reflection on a web-grounded answer does
-   NOT re-trigger document retrieval; it ends the loop, preserving the live web result.
-10. **`safe_fail` branch from `web_search` node** — architecture diagram was missing this edge.
-
-### Outdated in previous version
-
-- Architecture diagram showed `safe_fail` only reachable from orchestrator — it is also
-  reachable from `web_search` (when web returns nothing and no chunks exist).
-- Section 4 described the reflection loop but omitted the web-guard termination condition.
-- Section 12 (Testing) described only the eval harness; the unit + trajectory suite was absent.
-
----
-
 ## 1. Overview
 
 The system answers questions over a corpus of uploaded PDFs (research reports) and
@@ -293,12 +257,6 @@ the chunk by `_evidence_snippet`, which:
 
 This replaces a blind first-500-characters truncation; users see the passage that
 actually supports the claim, not the opening boilerplate.
-
-**PDF symbol font decoding:** PyPDF2 emits glyph codes instead of real characters for
-Symbol-font PDFs (common in academic statistics papers). `_clean_pdf_text` maps these
-before snippet extraction: `/H11005 → =`, `/H11021 → <`, `/H11022 → >`, `/H11349 → ±`,
-and twelve others. This ensures citation snippets are human-readable (e.g.
-`r = .58, p < .001` instead of `r /H11005 .58, p /H11021 .001`).
 
 **Session safety:** `CitationManager` is scoped per `session_id` (or per-request when no
 session id is supplied) — there is **no process-global shared citation state**, so
@@ -581,8 +539,6 @@ the numbers you defend in a demo or report.
 ---
 
 ## 14. Limitations & Future Improvements
-
-Stated honestly — these are known, not hidden:
 
 - **Embedding ceiling.** all-MiniLM-L6-v2 (384-d) is lightweight; upgrading to a stronger
   embedder (e.g. `bge`/`mxbai`-class, 768–1024-d) and re-indexing is the highest-leverage

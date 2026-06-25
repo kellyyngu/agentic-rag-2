@@ -295,6 +295,124 @@ def _evidence_snippet(content: str, claim: str, max_chars: int = 600) -> str:
     return f"{prefix}{snippet}{suffix}".strip()
 
 
+# ── Post-generation pipeline (pure, independently testable) ─────────────────
+# These are extracted from run() so the confidence policy can be unit-tested
+# without driving a token stream. Behaviour is identical to the inline version.
+
+def parse_generation(full_text: str) -> tuple[str, list[str], float]:
+    """Strip the trailing metadata block; return (answer, follow_ups, llm_score)."""
+    follow_ups: list[str] = []
+    meta, split_pos = _extract_meta(full_text)
+    if meta is not None:
+        answer = full_text[:split_pos].strip()
+        follow_ups = meta.get("follow_up_questions", [])
+        llm_score = float(meta.get("confidence_score", 0.75))
+        if llm_score > 1.0:
+            llm_score /= 10.0
+        llm_score = max(0.0, min(1.0, llm_score))
+    elif split_pos >= 0:
+        # Truncated/unclosed JSON block (pattern 4): no parsable metadata, but we
+        # still know where it starts — cut everything from there so it never shows.
+        answer = full_text[:split_pos].strip()
+        llm_score = 0.75
+    else:
+        answer = re.sub(r'\s*<<<JSON[\s\S]*?>>>\s*', '', full_text).strip()
+        answer = re.sub(r'\s*```(?:json)?\s*\{[\s\S]*?\}\s*```\s*', '', answer).strip()
+        answer = re.sub(r'\s*<<<JSON[\s\S]*$', '', answer).strip()
+        llm_score = 0.75
+    return answer, follow_ups, llm_score
+
+
+def build_citations(
+    answer: str,
+    chunk_map: dict[str, RetrievedChunk],
+    local_to_global: dict[str, str],
+    query: str,
+) -> tuple[list[Citation], str]:
+    """Build Citation objects from the inline [N] markers the answer actually cites,
+    then rewrite those markers from local context indices to global IDs.
+
+    Grouped citations like [2, 4] are supported; the source's own bibliography
+    numbers (not in chunk_map) are filtered out. Returns (citations, remapped_answer).
+    """
+    cited_local_ids = _extract_cited_ids(answer, set(chunk_map))
+    citations: list[Citation] = []
+    seen_global: set[str] = set()
+    for local_cid in cited_local_ids:
+        chunk = chunk_map[local_cid]
+        global_id = local_to_global.get(local_cid, local_cid)
+        if global_id not in seen_global:
+            # Use vector cosine similarity as the displayed relevance score.
+            # The reranker score (chunk.score) is for ranking only — it gives
+            # near-zero values for meta-queries like "what is my report about"
+            # even when the chunks ARE relevant. Vector cosine similarity is
+            # a more robust and meaningful signal for the user-facing percentage.
+            display_score = chunk.vector_score if chunk.vector_score > 0 else chunk.score
+            # Evidence-centric excerpt: show the passage of this chunk that actually
+            # supports the sentence(s) citing it, not just the chunk's opening lines.
+            claim = _claim_for(local_cid, answer, query)
+            citations.append(Citation(
+                id=global_id,
+                source=chunk.source,
+                page=chunk.page,
+                excerpt=_evidence_snippet(chunk.content, claim),
+                relevance_score=round(display_score, 3),
+            ))
+            seen_global.add(global_id)
+
+    # Rewrite inline [N] / [N, M] references to global IDs in a single pass.
+    answer = _remap_citation_groups(answer, local_to_global)
+    return citations, answer
+
+
+def calibrate_confidence(
+    answer: str,
+    citations: list[Citation],
+    retrieval_conf: float,
+    has_web: bool,
+    llm_score: float,
+    num_chunks: int,
+) -> tuple[list[Citation], str, float]:
+    """Grounding-aware confidence + citation calibration.
+
+    An answer is "grounded" only if it cites a sufficiently-relevant chunk OR is
+    backed by web results — AND is not an information-absence reply. This stops
+    adversarial "X is not mentioned" answers from carrying high confidence and a
+    fistful of citations, and keeps confidence honest for ungrounded answers.
+
+    All policy weights come from config (settings.confidence_*) so the scoring can
+    be retuned without code changes. Returns (citations, answer, confidence).
+    """
+    retrieval_conf = max(0.0, min(1.0, float(retrieval_conf)))
+    top_cited      = max((c.relevance_score for c in citations), default=0.0)
+    is_negative    = _is_negative_answer(answer)
+    is_grounded    = (top_cited >= settings.grounding_threshold or has_web) and not is_negative
+
+    if not is_grounded:
+        # Weak / negative / off-topic answer: drop the misleading citations and the
+        # now-dangling inline markers, and report low, honest confidence.
+        citations = []
+        answer = re.sub(r'\s*\[[\d,\s]+\]', '', answer).strip()
+        confidence = round(min(settings.confidence_ungrounded_cap, retrieval_conf), 3)
+    elif has_web and not citations:
+        # Web-grounded answer (no document citations). Base confidence on the LLM's
+        # self-rating with a floor — we DID retrieve live results to ground it.
+        confidence = max(0.0, min(1.0, round(
+            settings.confidence_web_base + llm_score * settings.confidence_web_llm_weight, 3
+        )))
+    else:
+        # Document-grounded answer: blend LLM self-rating, retrieval relevance, and
+        # citation coverage.
+        citation_support = min(len(citations) / max(num_chunks, 1), 1.0)
+        confidence = max(0.0, min(1.0, round(
+            llm_score * settings.confidence_doc_llm_weight
+            + retrieval_conf * settings.confidence_doc_retrieval_weight
+            + citation_support * settings.confidence_doc_citation_weight,
+            3,
+        )))
+    return citations, answer, confidence
+
+
 async def run(state: AgentState) -> AgentState:
     t0 = time.time()
     chunks = state.get("retrieved_chunks", [])
@@ -368,10 +486,8 @@ async def run(state: AgentState) -> AgentState:
         logger.error(f"[generator] streaming failed: {e}")
         full_text = f"I encountered an error generating the response: {e}"
 
-    answer = full_text
-    citations: list[Citation] = []
-    follow_ups: list[str] = []
-    confidence = 0.75
+    # --- Step 1: parse the streamed text into answer + metadata ---
+    answer, follow_ups, llm_score = parse_generation(full_text)
 
     # Build a lookup from 1-based citation index → actual retrieved chunk.
     # This index is canonical: it matches the [N] numbers given to the LLM in the context.
@@ -388,86 +504,18 @@ async def run(state: AgentState) -> AgentState:
         else:
             local_to_global[local_id] = local_id  # graceful fallback
 
-    # --- Step 1: Strip the metadata block from the visible answer text ---
-    meta, split_pos = _extract_meta(full_text)
-    if meta is not None:
-        answer = full_text[:split_pos].strip()
-        follow_ups = meta.get("follow_up_questions", [])
-        llm_score = float(meta.get("confidence_score", 0.75))
-        if llm_score > 1.0:
-            llm_score /= 10.0
-        llm_score = max(0.0, min(1.0, llm_score))
-    elif split_pos >= 0:
-        # Truncated/unclosed JSON block (pattern 4): no parsable metadata, but we
-        # still know where it starts — cut everything from there so it never shows.
-        answer = full_text[:split_pos].strip()
-        llm_score = 0.75
-    else:
-        answer = re.sub(r'\s*<<<JSON[\s\S]*?>>>\s*', '', full_text).strip()
-        answer = re.sub(r'\s*```(?:json)?\s*\{[\s\S]*?\}\s*```\s*', '', answer).strip()
-        answer = re.sub(r'\s*<<<JSON[\s\S]*$', '', answer).strip()
-        llm_score = 0.75
+    # --- Step 2: build citations from inline [N] references and remap to global IDs ---
+    citations, answer = build_citations(answer, chunk_map, local_to_global, state["query"])
 
-    # --- Step 2: Build citations from inline [N] references in the answer ---
-    # Extract which context positions the LLM actually cited (grouped citations like
-    # [2, 4] are fully supported; the source's own bibliography numbers are filtered
-    # out), then map each local [N] → global ID and rewrite the answer text.
-    cited_local_ids = _extract_cited_ids(answer, set(chunk_map))
-    seen_global: set[str] = set()
-    for local_cid in cited_local_ids:
-        chunk = chunk_map[local_cid]
-        global_id = local_to_global.get(local_cid, local_cid)
-        if global_id not in seen_global:
-            # Use vector cosine similarity as the displayed relevance score.
-            # The reranker score (chunk.score) is for ranking only — it gives
-            # near-zero values for meta-queries like "what is my report about"
-            # even when the chunks ARE relevant. Vector cosine similarity is
-            # a more robust and meaningful signal for the user-facing percentage.
-            display_score = chunk.vector_score if chunk.vector_score > 0 else chunk.score
-            # Evidence-centric excerpt: show the passage of this chunk that actually
-            # supports the sentence(s) citing it, not just the chunk's opening lines.
-            claim = _claim_for(local_cid, answer, state["query"])
-            citations.append(Citation(
-                id=global_id,
-                source=chunk.source,
-                page=chunk.page,
-                excerpt=_evidence_snippet(chunk.content, claim),
-                relevance_score=round(display_score, 3),
-            ))
-            seen_global.add(global_id)
-
-    # Rewrite inline [N] / [N, M] references to global IDs in a single pass.
-    answer = _remap_citation_groups(answer, local_to_global)
-
-    # --- Step 3: Grounding-aware confidence + citation calibration ---
-    # An answer is "grounded" only if it cites a sufficiently-relevant chunk OR is
-    # backed by web results — AND is not an information-absence reply. This stops
-    # adversarial "X is not mentioned" answers from carrying high confidence and a
-    # fistful of citations, and keeps confidence honest for ungrounded answers.
-    retrieval_conf = max(0.0, min(1.0, float(state.get("retrieval_confidence", 0.0))))
-    has_web        = bool(state.get("web_search_results"))
-    top_cited      = max((c.relevance_score for c in citations), default=0.0)
-    is_negative    = _is_negative_answer(answer)
-    is_grounded    = (top_cited >= settings.grounding_threshold or has_web) and not is_negative
-
-    if not is_grounded:
-        # Weak / negative / off-topic answer: drop the misleading citations and the
-        # now-dangling inline markers, and report low, honest confidence.
-        citations = []
-        answer = re.sub(r'\s*\[[\d,\s]+\]', '', answer).strip()
-        confidence = round(min(0.25, retrieval_conf), 3)
-    elif has_web and not citations:
-        # Web-grounded answer (no document citations). Base confidence on the LLM's
-        # self-rating with a floor — we DID retrieve live results to ground it.
-        confidence = max(0.0, min(1.0, round(0.45 + llm_score * 0.35, 3)))
-    else:
-        # Document-grounded answer: blend LLM self-rating, retrieval relevance, and
-        # citation coverage.
-        citation_support = min(len(citations) / max(len(chunks), 1), 1.0)
-        confidence = max(0.0, min(1.0, round(
-            llm_score * 0.4 + retrieval_conf * 0.4 + citation_support * 0.2,
-            3,
-        )))
+    # --- Step 3: grounding-aware confidence + citation calibration ---
+    citations, answer, confidence = calibrate_confidence(
+        answer=answer,
+        citations=citations,
+        retrieval_conf=state.get("retrieval_confidence", 0.0),
+        has_web=bool(state.get("web_search_results")),
+        llm_score=llm_score,
+        num_chunks=len(chunks),
+    )
 
     elapsed = time.time() - t0
     logger.info(f"[generator] answer_len={len(answer)} citations={len(citations)} t={elapsed:.2f}s")

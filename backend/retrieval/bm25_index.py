@@ -2,6 +2,7 @@ import os
 import json
 import pickle
 import re
+import threading
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,12 +27,21 @@ def _tokenize(text: str) -> List[str]:
 
 
 class BM25Index:
+    """Thread-safe BM25 keyword index.
+
+    A single RLock guards all mutations to ``self.docs`` and ``self.bm25`` so
+    concurrent document uploads and searches never observe a partially-rebuilt
+    index.  ``add()`` is CPU- and I/O-bound; callers inside an async context
+    should dispatch it via ``asyncio.to_thread()``.
+    """
+
     def __init__(self, data_dir: str = "/app/data"):
         self.data_dir = data_dir
         self.index_path = os.path.join(data_dir, "bm25_index.pkl")
         self.docs_path = os.path.join(data_dir, "bm25_docs.json")
         self.bm25: Optional[BM25Okapi] = None
         self.docs: List[IndexedDoc] = []
+        self._lock = threading.RLock()
 
     def load(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -56,24 +66,25 @@ class BM25Index:
         self.bm25 = BM25Okapi(tokenized)
 
     def add(self, chunks: List[DocumentChunk]):
-        existing_ids = {d.chunk_id for d in self.docs}
-        new_docs = [
-            IndexedDoc(
-                chunk_id=c.chunk_id,
-                content=c.content,
-                source=c.source,
-                page=c.page,
-            )
-            for c in chunks
-            if c.chunk_id not in existing_ids
-        ]
-        if not new_docs:
-            return
+        with self._lock:
+            existing_ids = {d.chunk_id for d in self.docs}
+            new_docs = [
+                IndexedDoc(
+                    chunk_id=c.chunk_id,
+                    content=c.content,
+                    source=c.source,
+                    page=c.page,
+                )
+                for c in chunks
+                if c.chunk_id not in existing_ids
+            ]
+            if not new_docs:
+                return
 
-        self.docs.extend(new_docs)
-        self._rebuild()
-        self._save()
-        logger.info(f"[bm25] added {len(new_docs)} docs, total={len(self.docs)}")
+            self.docs.extend(new_docs)
+            self._rebuild()
+            self._save()
+            logger.info(f"[bm25] added {len(new_docs)} docs, total={len(self.docs)}")
 
     def _save(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -84,32 +95,34 @@ class BM25Index:
 
     def search(self, query: str, top_k: int = 20) -> List[Tuple[str, str, Optional[str], Optional[int], float]]:
         """Returns list of (chunk_id, content, source, page, score)."""
-        if not self.bm25 or not self.docs:
-            return []
+        with self._lock:
+            if not self.bm25 or not self.docs:
+                return []
 
-        tokens = _tokenize(query)
-        scores = self.bm25.get_scores(tokens)
+            tokens = _tokenize(query)
+            scores = self.bm25.get_scores(tokens)
 
-        # Get top-k indices
-        indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
+            # Get top-k indices
+            indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
 
-        results = []
-        max_score = indexed[0][1] if indexed else 1.0
-        for idx, score in indexed:
-            if score <= 0:
-                continue
-            doc = self.docs[idx]
-            normalized = score / max(max_score, 1e-9)
-            results.append((doc.chunk_id, doc.content, doc.source, doc.page, normalized))
+            results = []
+            max_score = indexed[0][1] if indexed else 1.0
+            for idx, score in indexed:
+                if score <= 0:
+                    continue
+                doc = self.docs[idx]
+                normalized = score / max(max_score, 1e-9)
+                results.append((doc.chunk_id, doc.content, doc.source, doc.page, normalized))
 
-        return results
+            return results
 
     def clear(self):
-        self.docs = []
-        self.bm25 = None
-        for p in [self.index_path, self.docs_path]:
-            if os.path.exists(p):
-                os.remove(p)
+        with self._lock:
+            self.docs = []
+            self.bm25 = None
+            for p in [self.index_path, self.docs_path]:
+                if os.path.exists(p):
+                    os.remove(p)
 
     @property
     def doc_count(self) -> int:

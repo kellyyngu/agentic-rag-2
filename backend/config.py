@@ -53,6 +53,33 @@ class Settings(BaseSettings):
     # citations are suppressed and confidence is capped low — no false certainty.
     grounding_threshold: float = Field(0.30, env="GROUNDING_THRESHOLD")
 
+    # ── Confidence calibration weights (generator) ──────────────────────────────
+    # The generator scores answer confidence with an explicit, tunable policy rather
+    # than hardcoded literals. All values calibrated for all-MiniLM-L6-v2 on the
+    # academic corpus; expose them so operators can retune without code changes.
+    #
+    # Ungrounded / negative / off-topic answers: confidence is capped at this value
+    # (and then floored by retrieval relevance) so a "not found" reply can never look
+    # certain.
+    confidence_ungrounded_cap: float = Field(0.25, env="CONFIDENCE_UNGROUNDED_CAP")
+    # Web-grounded answers (no document citations): confidence = base + llm_self_rating*llm_weight.
+    # The base is a floor that credits having retrieved live evidence at all.
+    confidence_web_base: float = Field(0.45, env="CONFIDENCE_WEB_BASE")
+    confidence_web_llm_weight: float = Field(0.35, env="CONFIDENCE_WEB_LLM_WEIGHT")
+    # Document-grounded answers: a weighted blend of the LLM self-rating, the retrieval
+    # cosine relevance, and citation coverage. The three weights are intended to sum to 1.
+    confidence_doc_llm_weight: float = Field(0.40, env="CONFIDENCE_DOC_LLM_WEIGHT")
+    confidence_doc_retrieval_weight: float = Field(0.40, env="CONFIDENCE_DOC_RETRIEVAL_WEIGHT")
+    confidence_doc_citation_weight: float = Field(0.20, env="CONFIDENCE_DOC_CITATION_WEIGHT")
+
+    # Bounded registries — cap long-lived in-memory maps so a long-running process
+    # cannot grow without limit. See agent/bounded_cache.py.
+    # One CitationManager per active session; LRU-evict the least-recently-used.
+    max_session_cache: int = Field(1000, env="MAX_SESSION_CACHE")
+    # Per-retriever chunk-content cache. Must comfortably exceed one query's working
+    # set (bm25_top_k + vector_top_k candidates) so no in-flight lookup is evicted.
+    chunk_cache_size: int = Field(10000, env="CHUNK_CACHE_SIZE")
+
     # Minimum vector cosine score for a chunk to survive the retriever filter.
     # Lower = keeps more chunks (better for non-academic docs like menus, reports).
     # Higher = stricter cross-document contamination filtering.

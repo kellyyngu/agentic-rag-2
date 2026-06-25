@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 from typing import List, Tuple, Optional
 import numpy as np
 from loguru import logger
@@ -13,6 +15,20 @@ from qdrant_client.models import (
 
 from config import settings
 from retrieval.document_processor import DocumentChunk
+
+
+def _point_id(chunk_id: str) -> int:
+    """Deterministic, collision-resistant Qdrant point ID derived from chunk_id.
+
+    Python's built-in hash() is randomized per process (PYTHONHASHSEED), so the
+    same chunk produced a *different* point ID after every restart — re-ingestion
+    silently created duplicate vectors instead of upserting in place. SHA-256 is
+    stable across processes; we take the top 63 bits (Qdrant point IDs are
+    unsigned integers) which keeps the value well within range while preserving
+    collision resistance for any realistic corpus size.
+    """
+    digest = hashlib.sha256(chunk_id.encode("utf-8")).hexdigest()
+    return int(digest[:16], 16) & 0x7FFFFFFFFFFFFFFF
 
 
 class VectorStore:
@@ -42,13 +58,16 @@ class VectorStore:
     async def upsert(self, chunks: List[DocumentChunk]) -> int:
         if not chunks:
             return 0
+        # Embedding + Qdrant upsert are blocking CPU/IO — run off the event loop.
+        return await asyncio.to_thread(self._upsert_blocking, chunks)
 
+    def _upsert_blocking(self, chunks: List[DocumentChunk]) -> int:
         texts = [c.content for c in chunks]
         vectors = self.embed(texts)
 
         points = [
             PointStruct(
-                id=abs(hash(c.chunk_id)) % (2**63),
+                id=_point_id(c.chunk_id),
                 vector=vectors[i].tolist(),
                 payload={
                     "chunk_id": c.chunk_id,
@@ -70,7 +89,11 @@ class VectorStore:
         """Returns list of (chunk_id, content, source, page, score)."""
         if not self.client:
             return []
+        # Embedding inference + vector search are blocking — run off the event loop
+        # so concurrent SSE streams aren't stalled. Results/ordering are unchanged.
+        return await asyncio.to_thread(self._search_blocking, query, top_k)
 
+    def _search_blocking(self, query: str, top_k: int) -> List[Tuple[str, str, Optional[str], Optional[int], float]]:
         vec = self.embed([query])[0].tolist()
         results: List[ScoredPoint] = self.client.search(
             collection_name=self.collection,

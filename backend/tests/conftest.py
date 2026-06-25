@@ -89,6 +89,16 @@ class _Settings:
     vector_top_k: int = 20
     rerank_top_k: int = 8
     final_top_k: int = 5
+    # Confidence calibration weights (mirror config.py defaults)
+    confidence_ungrounded_cap: float = 0.25
+    confidence_web_base: float = 0.45
+    confidence_web_llm_weight: float = 0.35
+    confidence_doc_llm_weight: float = 0.40
+    confidence_doc_retrieval_weight: float = 0.40
+    confidence_doc_citation_weight: float = 0.20
+    # Bounded registries
+    max_session_cache: int = 1000
+    chunk_cache_size: int = 10000
 
 
 _settings_instance = _Settings()

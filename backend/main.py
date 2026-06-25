@@ -6,6 +6,7 @@ import sys
 
 from config import settings
 from api import chat, documents
+from agent.bounded_cache import LRUCache
 from retrieval.vector_store import VectorStore
 from retrieval.bm25_index import BM25Index
 from retrieval.hybrid_retriever import HybridRetriever
@@ -35,8 +36,11 @@ async def lifespan(app: FastAPI):
     # Per-session citation registries (session_id → CitationManager).
     # Replaces the old process-global singleton so concurrent users never share
     # or collide on citation IDs. Sessions without an id get a fresh per-request
-    # manager in the chat handler (full isolation).
-    app.state.citation_managers = {}
+    # manager in the chat handler (full isolation). Bounded with an LRU so a
+    # long-running process can't accumulate sessions without limit — the least
+    # recently used session is evicted past the cap (it simply re-initialises if
+    # it returns, re-numbering citations from 1).
+    app.state.citation_managers = LRUCache(max_size=settings.max_session_cache)
     logger.info("All services ready.")
     yield
     logger.info("Shutting down.")

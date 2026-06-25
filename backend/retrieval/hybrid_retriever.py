@@ -1,8 +1,10 @@
 import os
+import asyncio
 from typing import List, Dict, Tuple, Optional
 from loguru import logger
 
 from agent.state import RetrievedChunk
+from agent.bounded_cache import LRUCache
 from retrieval.vector_store import VectorStore
 from retrieval.bm25_index import BM25Index
 from retrieval.reranker import Reranker
@@ -36,12 +38,17 @@ class HybridRetriever:
         # Only affects which ranked list(s) feed RRF — reranker/thresholds unchanged.
         self.mode = os.getenv("RETRIEVAL_MODE", "hybrid")
 
-        # Cache chunk content for reranking (chunk_id → (content, source, page))
-        self._chunk_cache: Dict[str, Tuple[str, Optional[str], Optional[int]]] = {}
+        # Cache chunk content for reranking (chunk_id → (content, source, page)).
+        # Bounded LRU so it can't grow unbounded over the process lifetime. The cap
+        # must exceed one query's working set (bm25_top_k + vector_top_k candidates)
+        # so no in-flight lookup is evicted mid-retrieve.
+        self._chunk_cache: LRUCache = LRUCache(max_size=settings.chunk_cache_size)
 
     async def retrieve(self, query: str, top_k: int = 5) -> List[RetrievedChunk]:
-        # 1. BM25 retrieval
-        bm25_results = self.bm25_index.search(query, top_k=settings.bm25_top_k)
+        # 1. BM25 retrieval — get_scores() is O(corpus) CPU work; run off the loop.
+        bm25_results = await asyncio.to_thread(
+            self.bm25_index.search, query, settings.bm25_top_k
+        )
         bm25_ranked = [(chunk_id, score) for chunk_id, _, _, _, score in bm25_results]
         for chunk_id, content, source, page, score in bm25_results:
             self._chunk_cache[chunk_id] = (content, source, page)
@@ -83,7 +90,7 @@ class HybridRetriever:
             logger.warning(f"[hybrid] no candidates for query='{query}'")
             return []
 
-        # 5. CrossEncoder reranking
-        reranked = self.reranker.rerank(query, candidates, top_k=top_k)
+        # 5. CrossEncoder reranking — model inference is blocking; run off the loop.
+        reranked = await asyncio.to_thread(self.reranker.rerank, query, candidates, top_k)
         logger.info(f"[{self.mode}] query='{query[:50]}' bm25={len(bm25_results)} vec={len(vector_results)} after_rerank={len(reranked)}")
         return reranked
