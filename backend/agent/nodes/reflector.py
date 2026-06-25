@@ -1,5 +1,4 @@
 import json
-import re
 import time
 from google import genai
 from google.genai import types
@@ -7,41 +6,6 @@ from loguru import logger
 
 from config import settings
 from agent.state import AgentState
-
-
-def _sanitize_json(s: str) -> str:
-    """Escape raw newlines/tabs inside JSON string values (same fix as generator.py)."""
-    result = []
-    in_string = False
-    i = 0
-    while i < len(s):
-        c = s[i]
-        if c == '\\' and in_string:
-            result.append(c)
-            if i + 1 < len(s):
-                result.append(s[i + 1])
-                i += 2
-            else:
-                i += 1
-            continue
-        if c == '"':
-            in_string = not in_string
-            result.append(c)
-            i += 1
-            continue
-        if in_string:
-            if c == '\n':
-                result.append('\\n')
-            elif c == '\r':
-                result.append('\\r')
-            elif c == '\t':
-                result.append('\\t')
-            else:
-                result.append(c)
-        else:
-            result.append(c)
-        i += 1
-    return ''.join(result)
 
 _client = genai.Client(api_key=settings.gemini_api_key)
 

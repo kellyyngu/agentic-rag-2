@@ -21,7 +21,7 @@ _CONVERSATIONAL_RE = re.compile(
     r"^\s*("
     r"hi+|hey+|hello+|howdy|yo|sup|hiya"
     r"|good\s+(morning|afternoon|evening|night|day)"
-    r"|how\s+are\s+(you|u)(\s+doing|today)?"
+    r"|how\s+are\s+(you|u)(\s+(?:doing|today))?"
     r"|what'?s\s+up"
     r"|thanks?(\s+you)?|thank\s+you|ty|thx|cheers"
     r"|bye+|goodbye|see\s+ya|later|cya|farewell"

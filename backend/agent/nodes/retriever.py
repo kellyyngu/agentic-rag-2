@@ -16,11 +16,11 @@ _DOC_REF_RE = re.compile(
 async def run(state: AgentState, retriever: Any) -> AgentState:
     t0 = time.time()
 
-    # Use sub-questions as search queries, fall back to original query
-    queries = state.get("sub_questions") or [state["query"]]
-    # Don't re-search if we already have chunks from a prior iteration
+    # On the reflection retry, search the reflector's feedback; else the original query.
     if state.get("retrieved_chunks") and state.get("iteration_count", 0) > 0:
         queries = [state["reflection_feedback"] or state["query"]]
+    else:
+        queries = [state["query"]]
 
     logger.info(f"[retriever] queries={queries}")
 

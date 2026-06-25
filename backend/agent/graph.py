@@ -45,9 +45,8 @@ def _route_after_retrieval(state: AgentState) -> str:
     if intent == "general_knowledge":
         return "direct"
     chunks = state.get("retrieved_chunks", [])
-    explicit_web = state.get("needs_web_search", False)
     low_coverage = len(chunks) < settings.web_search_fallback_threshold
-    return "web_search" if (explicit_web or low_coverage) else "generate"
+    return "web_search" if low_coverage else "generate"
 
 
 def _should_continue(state: AgentState) -> str:
@@ -166,9 +165,6 @@ async def run_agent(
         "query":               query,
         "conversation_history": conversation_history,
         "intent":              "document_qa",
-        "sub_questions":       [],
-        "retrieval_strategy":  "agentic",
-        "needs_web_search":    False,
         "retrieved_chunks":    [],
         "search_queries_used": [],
         "web_search_results":  [],

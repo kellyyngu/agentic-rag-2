@@ -5,7 +5,7 @@ from loguru import logger
 import sys
 
 from config import settings
-from api import chat, documents, evaluate
+from api import chat, documents
 from retrieval.vector_store import VectorStore
 from retrieval.bm25_index import BM25Index
 from retrieval.hybrid_retriever import HybridRetriever
@@ -59,7 +59,6 @@ app.add_middleware(
 
 app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
-app.include_router(evaluate.router, prefix="/api", tags=["evaluate"])
 
 
 @app.get("/health")

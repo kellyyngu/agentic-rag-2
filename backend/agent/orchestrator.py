@@ -321,40 +321,26 @@ async def _exec_retrieve(
 
 
 async def _exec_web(query: str, accumulated_web: list[dict]) -> dict:
-    """Web search via Tavily (reliable from datacenter IPs, unlike DuckDuckGo)."""
+    """Web search via Tavily — reuses the shared tavily_search helper (single source of truth)."""
     import os
-    import httpx
+    from agent.nodes.web_search import tavily_search
 
-    key = os.getenv("TAVILY_API_KEY")
-    if not key:
+    if not os.getenv("TAVILY_API_KEY"):
         return {
             "summary": "Web search disabled (no TAVILY_API_KEY).",
             "for_llm": "Web search unavailable. Answer from the document context already retrieved.",
         }
-    try:
-        resp = await asyncio.to_thread(lambda: httpx.post(
-            "https://api.tavily.com/search",
-            json={"api_key": key, "query": query, "max_results": 4},
-            timeout=10.0,
-        ))
-        results = resp.json().get("results", [])
-        snippets = [
-            {"title": r.get("title", ""), "body": r.get("content", ""), "href": r.get("url", "")}
-            for r in results
-        ]
-        accumulated_web.extend(snippets)
-        preview = "\n".join(f"- {s['title']}: {s['body'][:150]}" for s in snippets[:2])
+
+    snippets = await tavily_search(query, max_results=4)
+    if not snippets:
         return {
-            "summary": f"Web search returned {len(snippets)} result(s) for '{query}'",
-            "for_llm": f"Found {len(snippets)} web results:\n{preview}" if snippets
-                       else "No web results found. Use document context.",
+            "summary": "Web search returned no results. Proceeding with document context.",
+            "for_llm": "No web results found. STOP calling tools and use the document chunks already retrieved.",
         }
-    except Exception as e:
-        logger.warning(f"[orchestrator] web_search failed: {e}")
-        return {
-            "summary": "Web search unavailable. Proceeding with document context.",
-            "for_llm": (
-                "Web search failed. STOP calling tools. "
-                "Use the document chunks already retrieved to answer."
-            ),
-        }
+
+    accumulated_web.extend(snippets)
+    preview = "\n".join(f"- {s['title']}: {s['body'][:150]}" for s in snippets[:2])
+    return {
+        "summary": f"Web search returned {len(snippets)} result(s) for '{query}'",
+        "for_llm": f"Found {len(snippets)} web results:\n{preview}",
+    }

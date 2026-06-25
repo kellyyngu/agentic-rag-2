@@ -49,11 +49,6 @@ class AgentState(TypedDict):
     # Routing
     intent: str
 
-    # Planning
-    sub_questions: List[str]
-    retrieval_strategy: str
-    needs_web_search: bool
-
     # Retrieval
     retrieved_chunks: List[RetrievedChunk]
     search_queries_used: List[str]
