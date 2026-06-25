@@ -80,6 +80,8 @@ async def main(suite: str) -> None:
               f"  (n={a.get('web_escalation_sample_size', 0)})")
         print(f"   Avg tool calls / query         {a.get('avg_tool_calls_per_query')}")
         print(f"   Citation accuracy              {_pct(a.get('citation_accuracy'))}")
+        print(f"   Keyword recall (deterministic) {_pct(a.get('keyword_recall'))}"
+              f"  (n={a.get('keyword_recall_n', 0)})")
         rc = a.get("retrieval_confidence", {})
         print(f"   Retrieval confidence (mean)    {rc.get('mean')}  (min={rc.get('min')}, max={rc.get('max')})")
 

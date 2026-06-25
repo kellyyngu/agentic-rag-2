@@ -51,6 +51,16 @@ def _expected_tool(item: dict) -> Any:
     return _EXPECTED_TOOL_BY_CATEGORY.get(item.get("category", ""), "retrieve_documents")
 
 
+def _keyword_recall(answer: str, required_keywords: list[str]) -> float | None:
+    """Deterministic metric: fraction of required_keywords present in the answer (case-insensitive).
+    Returns None when no keywords are defined for the question."""
+    if not required_keywords:
+        return None
+    answer_lower = answer.lower()
+    hits = sum(1 for kw in required_keywords if kw.lower() in answer_lower)
+    return hits / len(required_keywords)
+
+
 def _citation_accuracy(trace: EvalTrace) -> float | None:
     """Fraction of inline [N] markers that resolve to a real citation id."""
     inline = trace.inline_citation_ids()
@@ -77,6 +87,7 @@ async def run_agentic_suite(items: list[dict], retriever: Any, citation_manager:
 
         reform_recovered = trace.reformulation_recovered()   # True / False / None
         cite_acc = _citation_accuracy(trace)
+        kw_recall = _keyword_recall(trace.final_answer or "", item.get("required_keywords", []))
 
         rows.append({
             "id": item.get("id", ""),
@@ -90,7 +101,9 @@ async def run_agentic_suite(items: list[dict], retriever: Any, citation_manager:
             "reformulation_recovered": reform_recovered,
             "escalated_to_web": trace.escalated_to_web(),
             "citation_accuracy": cite_acc,
+            "keyword_recall": kw_recall,
             "retrieval_confidence": round(trace.retrieval_confidence, 3),
+            "latency_s": round(trace.latency_s, 2),
             "intent": trace.intent,
             "error": trace.error,
         })
@@ -130,6 +143,10 @@ def _aggregate(rows: list[dict], items: list[dict]) -> dict:
     cite_vals = [r["citation_accuracy"] for r in rows if r["citation_accuracy"] is not None]
     citation_acc = statistics.mean(cite_vals) if cite_vals else None
 
+    # Keyword recall — deterministic, no LLM (only factual questions with required_keywords)
+    kw_vals = [r["keyword_recall"] for r in rows if r["keyword_recall"] is not None]
+    keyword_recall = statistics.mean(kw_vals) if kw_vals else None
+
     # Retrieval confidence stats (only doc-QA rows that retrieved something)
     conf_vals = [r["retrieval_confidence"] for r in rows if r["retrieval_confidence"] > 0]
     conf_stats = {
@@ -137,6 +154,21 @@ def _aggregate(rows: list[dict], items: list[dict]) -> dict:
         "min": round(min(conf_vals), 3) if conf_vals else 0.0,
         "max": round(max(conf_vals), 3) if conf_vals else 0.0,
         "n": len(conf_vals),
+    }
+
+    # Latency stats (P50 / P95) over all successful queries
+    lat_vals = sorted(r["latency_s"] for r in rows if not r["error"])
+    def _pct(p: float) -> float:
+        if not lat_vals:
+            return 0.0
+        k = max(0, min(len(lat_vals) - 1, int(round(p * (len(lat_vals) - 1)))))
+        return round(lat_vals[k], 2)
+    latency_stats = {
+        "p50": _pct(0.50),
+        "p95": _pct(0.95),
+        "mean": round(statistics.mean(lat_vals), 2) if lat_vals else 0.0,
+        "max": round(max(lat_vals), 2) if lat_vals else 0.0,
+        "n": len(lat_vals),
     }
 
     return {
@@ -152,7 +184,10 @@ def _aggregate(rows: list[dict], items: list[dict]) -> dict:
         "web_escalation_sample_size": len(ooc),
         "avg_tool_calls_per_query": round(avg_tool_calls, 2),
         "citation_accuracy": round(citation_acc, 3) if citation_acc is not None else None,
+        "keyword_recall": round(keyword_recall, 3) if keyword_recall is not None else None,
+        "keyword_recall_n": len(kw_vals),
         "retrieval_confidence": conf_stats,
+        "latency": latency_stats,
         "errors": sum(1 for r in rows if r["error"]),
     }
 
@@ -169,8 +204,8 @@ def _write_outputs(rows: list[dict], summary: dict) -> None:
         w.writerow([
             "id", "category", "expected_tool", "first_tool", "tool_correct",
             "num_tool_calls", "did_reformulate", "reformulation_recovered",
-            "escalated_to_web", "citation_accuracy", "retrieval_confidence",
-            "intent", "error",
+            "escalated_to_web", "citation_accuracy", "keyword_recall",
+            "retrieval_confidence", "latency_s", "intent", "error",
         ])
         for r in rows:
             w.writerow([
@@ -178,5 +213,6 @@ def _write_outputs(rows: list[dict], summary: dict) -> None:
                 r["tool_correct"], r["num_tool_calls"], r["did_reformulate"],
                 r["reformulation_recovered"], r["escalated_to_web"],
                 "" if r["citation_accuracy"] is None else round(r["citation_accuracy"], 3),
-                r["retrieval_confidence"], r["intent"], r["error"] or "",
+                "" if r["keyword_recall"] is None else round(r["keyword_recall"], 3),
+                r["retrieval_confidence"], r["latency_s"], r["intent"], r["error"] or "",
             ])

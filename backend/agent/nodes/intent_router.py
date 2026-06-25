@@ -123,7 +123,13 @@ def _classify_with_llm(query: str, state: AgentState) -> str:
         response = _client.models.generate_content(
             model=settings.llm_model,
             contents=ROUTER_PROMPT.format(query=query, history=history_text),
-            config=types.GenerateContentConfig(max_output_tokens=64, temperature=0),
+            config=types.GenerateContentConfig(
+                max_output_tokens=64,
+                temperature=0,
+                # gemini-2.5-flash thinking tokens were consuming the 64-token
+                # budget → empty response → None. Disable thinking for classification.
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         raw = response.text
         if raw is None:

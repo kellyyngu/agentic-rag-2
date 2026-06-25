@@ -23,7 +23,7 @@ from config import settings
 _client = genai.Client(api_key=settings.gemini_api_key)
 
 MAX_ITERATIONS = 3
-QUALITY_THRESHOLD = 0.40  # avg vector_score; at/above this = sufficient context
+QUALITY_THRESHOLD = 0.30  # calibrated to all-MiniLM-L6-v2 cosine range (was 0.40)
 MIN_GOOD_CHUNKS = 3       # stop early once we have this many high-quality chunks
 
 # ─────────────────────────────────────────────────────────────
@@ -317,32 +317,40 @@ async def _exec_retrieve(
 
 
 async def _exec_web(query: str, accumulated_web: list[dict]) -> dict:
-    """Run a DuckDuckGo search in a thread (blocking SDK)."""
-    try:
-        from duckduckgo_search import DDGS
+    """Web search via Tavily (reliable from datacenter IPs, unlike DuckDuckGo)."""
+    import os
+    import httpx
 
-        raw = await asyncio.to_thread(
-            lambda: list(DDGS().text(query, max_results=4))
-        )
+    key = os.getenv("TAVILY_API_KEY")
+    if not key:
+        return {
+            "summary": "Web search disabled (no TAVILY_API_KEY).",
+            "for_llm": "Web search unavailable. Answer from the document context already retrieved.",
+        }
+    try:
+        resp = await asyncio.to_thread(lambda: httpx.post(
+            "https://api.tavily.com/search",
+            json={"api_key": key, "query": query, "max_results": 4},
+            timeout=10.0,
+        ))
+        results = resp.json().get("results", [])
         snippets = [
-            {"title": r.get("title", ""), "body": r.get("body", ""), "href": r.get("href", "")}
-            for r in raw
+            {"title": r.get("title", ""), "body": r.get("content", ""), "href": r.get("url", "")}
+            for r in results
         ]
         accumulated_web.extend(snippets)
-        preview = "\n".join(
-            f"- {s['title']}: {s['body'][:150]}" for s in snippets[:2]
-        )
+        preview = "\n".join(f"- {s['title']}: {s['body'][:150]}" for s in snippets[:2])
         return {
             "summary": f"Web search returned {len(snippets)} result(s) for '{query}'",
-            "for_llm": f"Found {len(snippets)} web results:\n{preview}",
+            "for_llm": f"Found {len(snippets)} web results:\n{preview}" if snippets
+                       else "No web results found. Use document context.",
         }
     except Exception as e:
         logger.warning(f"[orchestrator] web_search failed: {e}")
         return {
-            "summary": "Web search unavailable (rate-limited). Proceeding with document context.",
-            # Tell the LLM explicitly to stop calling tools and use what it has
+            "summary": "Web search unavailable. Proceeding with document context.",
             "for_llm": (
-                "Web search is rate-limited and unavailable right now. "
-                "STOP calling tools. Use the document chunks already retrieved to answer."
+                "Web search failed. STOP calling tools. "
+                "Use the document chunks already retrieved to answer."
             ),
         }

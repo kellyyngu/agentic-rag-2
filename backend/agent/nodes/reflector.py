@@ -103,29 +103,35 @@ async def run(state: AgentState) -> AgentState:
             chunk_count=len(state.get("retrieved_chunks", [])),
             confidence=state.get("confidence_score", 0),
         )
+        # Force valid JSON via Gemini constrained decoding — no more prose/parse failures.
         response = _client.models.generate_content(
             model=settings.llm_model,
             contents=prompt,
-            config=types.GenerateContentConfig(max_output_tokens=512),
+            config=types.GenerateContentConfig(
+                max_output_tokens=1024,
+                temperature=0.0,
+                # gemini-2.5-flash spends max_output_tokens on "thinking" first,
+                # which truncated the JSON. Disable it — reflection is simple classification.
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                response_mime_type="application/json",
+                response_schema=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "passed": types.Schema(type=types.Type.BOOLEAN),
+                        "feedback": types.Schema(type=types.Type.STRING),
+                        "missing_aspects": types.Schema(
+                            type=types.Type.ARRAY,
+                            items=types.Schema(type=types.Type.STRING),
+                        ),
+                        "should_retrieve_more": types.Schema(type=types.Type.BOOLEAN),
+                    },
+                    required=["passed", "should_retrieve_more"],
+                ),
+            ),
         )
         raw = (response.text or "").strip()
-
-        # Empty response from Gemini — treat as pass
-        if not raw:
-            raise ValueError("empty response from LLM")
-
-        # Tier 1: markdown fenced block
-        m = re.search(r'```(?:json)?\s*\n?(\{[\s\S]*?\})\s*\n?```', raw)
-        if m:
-            raw = m.group(1)
-
-        # Tier 2: first JSON object in the response
-        if not raw.startswith('{'):
-            m = re.search(r'\{[\s\S]*\}', raw)
-            if m:
-                raw = m.group(0)
-
-        result = json.loads(_sanitize_json(raw.strip()))
+        if raw:
+            result = json.loads(raw)
     except Exception as e:
         logger.warning(f"[reflector] LLM failed: {e}, defaulting to passed=True")
 

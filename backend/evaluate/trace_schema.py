@@ -106,14 +106,19 @@ class EvalTrace:
         return "GOOD" in qualities[weak_idx + 1:]
 
     def escalated_to_web(self) -> bool:
-        """web_search invoked at any point after a document retrieval attempt."""
+        """True if web search was used — either via orchestrator tool call or
+        via direct router intent=web_search routing to the web_search node."""
+        # Direct router escalation: router classified as web_search intent
+        if self.intent == "web_search":
+            return True
+        # Orchestrator-driven escalation: web_search called as a tool
         seen_retrieve = False
         for t in self.tool_calls:
             if t.tool == "retrieve_documents":
                 seen_retrieve = True
             elif t.tool == "web_search" and seen_retrieve:
                 return True
-        return bool(self.web_calls)  # also count direct web-first escalation
+        return bool(self.web_calls)
 
     # ── Construction from the raw orchestrator state ────────────────────────
 
