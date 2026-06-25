@@ -16,6 +16,21 @@ DIRECT_INTENTS = {
     "assistant_identity", "general_knowledge",
 }
 
+# Fast keyword match for unambiguous real-time / web queries.
+# These need live data the documents can never contain, so we route straight to
+# web_search instead of relying on the (occasionally wrong) LLM classifier.
+_WEB_QUERY_RE = re.compile(
+    r"\b("
+    r"weather|temperature\s+(today|now|right\s+now|in)"
+    r"|forecast"
+    r"|(latest|breaking|today'?s|recent)\s+news|news\s+(today|now|headlines)"
+    r"|stock\s+price|share\s+price|exchange\s+rate|currency\s+rate"
+    r"|price\s+of\s+\w+\s+(today|now)"
+    r"|current\s+(time|date|price|events)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Fast keyword match for unambiguous conversational patterns
 _CONVERSATIONAL_RE = re.compile(
     r"^\s*("
@@ -94,9 +109,13 @@ async def run(state: AgentState) -> AgentState:
     t0 = time.time()
     query = state["query"].strip()
 
-    # Fast path: obvious conversational patterns only
+    # Fast path 1: obvious conversational patterns
     if _CONVERSATIONAL_RE.match(query):
         intent = "conversational"
+        logger.info(f"[router] query='{query}' intent='{intent}' (keyword) t={time.time()-t0:.3f}s")
+    # Fast path 2: unambiguous real-time queries → web_search (no LLM needed)
+    elif _WEB_QUERY_RE.search(query):
+        intent = "web_search"
         logger.info(f"[router] query='{query}' intent='{intent}' (keyword) t={time.time()-t0:.3f}s")
     else:
         intent = _classify_with_llm(query, state)

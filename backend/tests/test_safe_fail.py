@@ -14,7 +14,12 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from agent.graph import _route_after_orchestrator, _route_after_retrieval, _should_continue
+from agent.graph import (
+    _route_after_orchestrator,
+    _route_after_retrieval,
+    _route_after_web_search,
+    _should_continue,
+)
 from config import settings
 
 
@@ -114,6 +119,29 @@ class TestRouteAfterRetrieval:
         assert _route_after_retrieval(state) == "web_search"
 
 
+# ─── _route_after_web_search (graceful empty-web fallback) ─────────────────
+
+class TestRouteAfterWebSearch:
+    """When web search yields nothing AND there are no chunks, route to safe_fail
+    with a clear message instead of feeding empty context to the generator."""
+
+    def test_web_results_route_to_generate(self):
+        state = {"web_search_results": [{"title": "t", "body": "b"}], "retrieved_chunks": []}
+        assert _route_after_web_search(state) == "generate"
+
+    def test_chunks_only_route_to_generate(self):
+        """Reflector retry path: chunks exist even if web is empty → generate."""
+        state = {"web_search_results": [], "retrieved_chunks": ["chunk"]}
+        assert _route_after_web_search(state) == "generate"
+
+    def test_nothing_routes_to_safe_fail(self):
+        state = {"web_search_results": [], "retrieved_chunks": []}
+        assert _route_after_web_search(state) == "safe_fail"
+
+    def test_missing_keys_route_to_safe_fail(self):
+        assert _route_after_web_search({}) == "safe_fail"
+
+
 # ─── _should_continue (reflection loop termination) ────────────────────────
 
 class TestShouldContinue:
@@ -149,3 +177,18 @@ class TestShouldContinue:
         """Default of True means the loop exits — safe default."""
         state = {"iteration_count": 0}
         assert _should_continue(state) == "end"
+
+    def test_web_grounded_answer_does_not_retry(self):
+        """The exchange-rate bug: a failed-reflection web answer must NOT retry into
+        documents (which discards the live web result). It should end instead."""
+        state = {
+            "reflection_passed": False,
+            "iteration_count": 1,
+            "web_search_results": [{"title": "USD/MYR", "body": "4.7"}],
+        }
+        assert _should_continue(state) == "end"
+
+    def test_failed_no_web_still_retries(self):
+        """Without web results, a failed reflection still retries documents."""
+        state = {"reflection_passed": False, "iteration_count": 1, "web_search_results": []}
+        assert _should_continue(state) == "retrieve"

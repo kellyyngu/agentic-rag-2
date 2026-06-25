@@ -13,7 +13,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from agent.nodes.intent_router import _CONVERSATIONAL_RE, DIRECT_INTENTS
+from agent.nodes.intent_router import _CONVERSATIONAL_RE, _WEB_QUERY_RE, DIRECT_INTENTS
 
 
 class TestConversationalRegex:
@@ -51,6 +51,37 @@ class TestConversationalRegex:
     ])
     def test_does_not_match_non_conversational(self, query):
         assert not _CONVERSATIONAL_RE.match(query), f"Expected no match for: {query!r}"
+
+
+class TestWebQueryRegex:
+    """Real-time queries must route to web_search deterministically — the LLM
+    classifier occasionally mislabels them as document_qa (the weather bug)."""
+
+    @pytest.mark.parametrize("query", [
+        "how is the weather in malaysia today",
+        "what's the weather like",
+        "weather forecast for tomorrow",
+        "latest news on the election",
+        "breaking news",
+        "today's news headlines",
+        "stock price of AAPL",
+        "what is the share price of Tesla",
+        "current exchange rate USD to MYR",
+        "current events in europe",
+    ])
+    def test_matches_web_query(self, query):
+        assert _WEB_QUERY_RE.search(query), f"Expected web match for: {query!r}"
+
+    @pytest.mark.parametrize("query", [
+        "what does OSM-PINN stand for",
+        "summarize my document",
+        "explain the methodology",
+        "what is machine learning",
+        # Must NOT steal document queries that happen to mention a report
+        "what does the report say about the model",
+    ])
+    def test_does_not_match_document_query(self, query):
+        assert not _WEB_QUERY_RE.search(query), f"Expected no web match for: {query!r}"
 
 
 class TestDirectIntents:

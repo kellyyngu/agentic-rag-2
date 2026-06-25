@@ -16,7 +16,10 @@ GENERATOR_SYSTEM = """You are an expert AI assistant that answers questions usin
 
 RULES:
 1. Answer ONLY from the provided context. If context is insufficient, say so clearly.
-2. Cite sources inline using [1], [2], etc. — every factual claim must have a citation.
+2. Cite sources inline using ONLY the bracketed source numbers shown in the CONTEXT
+   (the [1], [2], ... that label each context block). Group multiple sources as [1, 3].
+   NEVER reproduce reference numbers that appear *inside* the source text itself
+   (e.g. a paper's own bibliography markers like "[7]") — only the context labels.
 3. If partial information is available, provide what you know and indicate gaps.
 4. Be concise but complete. Use markdown for structure when appropriate.
 5. After your answer, output a metadata block that starts with the exact line: <<<JSON
@@ -122,6 +125,66 @@ def _build_web_context(results: list[dict]) -> str:
     return "\n".join(f"- {r['title']}: {r['body'][:300]}" for r in results[:3])
 
 
+# Phrases that signal the answer is a "not found" / information-absence reply.
+# Deliberately about *missing information*, not about content (so "OSM-PINN does not
+# use symmetric penalties" — a substantive claim — does NOT match).
+_NEGATIVE_MARKERS = (
+    "does not mention", "doesn't mention", "not mentioned", "no mention of",
+    "does not discuss", "doesn't discuss", "does not contain", "doesn't contain",
+    "does not provide", "doesn't provide", "does not specify", "doesn't specify",
+    "does not appear", "doesn't appear", "not appear in",
+    "no information", "no relevant information", "could not find", "couldn't find",
+    "not found in", "is not mentioned", "isn't mentioned", "not contain any",
+    "i cannot provide", "i can't provide", "i could not find", "unable to find",
+    "context does not", "context doesn't", "documents do not", "documents don't",
+)
+
+
+def _is_negative_answer(answer: str) -> bool:
+    """True when the answer is an information-absence reply ("X is not mentioned").
+
+    Such answers must not carry citations or high confidence — the cited chunks
+    do not *support* the claim, they merely failed to contain the requested fact.
+    """
+    low = answer.lower()
+    return any(marker in low for marker in _NEGATIVE_MARKERS)
+
+
+def _extract_cited_ids(answer: str, valid_ids: set[str]) -> list[str]:
+    """Return the ordered, de-duplicated chunk indices the answer actually cites.
+
+    Handles grouped citations — [3], [2, 4], [2, 4, 6] are all parsed. Any bracketed
+    number that is NOT a real retrieved-chunk index is ignored (academic papers embed
+    their own bibliography markers like "[7]" in the body text, which must never
+    become citations). Returns indices sorted ascending by value.
+    """
+    out: list[str] = []
+    for group in re.findall(r'\[([\d,\s]+)\]', answer):
+        for num in re.findall(r'\d+', group):
+            if num in valid_ids and num not in out:
+                out.append(num)
+    out.sort(key=int)
+    return out
+
+
+def _remap_citation_groups(answer: str, local_to_global: dict[str, str]) -> str:
+    """Rewrite every [N] / [N, M, ...] group from local context indices to global IDs.
+
+    Numbers that don't map to a retrieved chunk (the source's own references) are
+    dropped from the group. A single regex pass with a replacement function avoids
+    the partial-replacement bug where rewriting [1] before [10] corrupts "[10]".
+    """
+    def _sub(match: re.Match) -> str:
+        mapped: list[str] = []
+        for num in re.findall(r'\d+', match.group(1)):
+            g = local_to_global.get(num)
+            if g and g not in mapped:
+                mapped.append(g)
+        return "[" + ", ".join(mapped) + "]" if mapped else ""
+
+    return re.sub(r'\[([\d,\s]+)\]', _sub, answer)
+
+
 async def run(state: AgentState) -> AgentState:
     t0 = time.time()
     logger.info(f"[generator] chunks={len(state.get('retrieved_chunks', []))}")
@@ -197,16 +260,15 @@ async def run(state: AgentState) -> AgentState:
         llm_score = 0.75
 
     # --- Step 2: Build citations from inline [N] references in the answer ---
-    # Extract which context positions the LLM actually cited, then:
-    #   a) Map each local [N] → global ID via CitationManager
-    #   b) Rewrite [N] in the answer text to [global_id]
-    # This guarantees per-document re-numbering by the LLM can never cause duplicates.
-    cited_local_ids = sorted(set(re.findall(r'\[(\d+)\]', answer)), key=lambda x: int(x))
+    # Extract which context positions the LLM actually cited (grouped citations like
+    # [2, 4] are fully supported; the source's own bibliography numbers are filtered
+    # out), then map each local [N] → global ID and rewrite the answer text.
+    cited_local_ids = _extract_cited_ids(answer, set(chunk_map))
     seen_global: set[str] = set()
     for local_cid in cited_local_ids:
-        chunk = chunk_map.get(local_cid)
+        chunk = chunk_map[local_cid]
         global_id = local_to_global.get(local_cid, local_cid)
-        if chunk and global_id not in seen_global:
+        if global_id not in seen_global:
             # Use vector cosine similarity as the displayed relevance score.
             # The reranker score (chunk.score) is for ranking only — it gives
             # near-zero values for meta-queries like "what is my report about"
@@ -222,21 +284,38 @@ async def run(state: AgentState) -> AgentState:
             ))
             seen_global.add(global_id)
 
-    # Remap [N] references in answer text to global IDs.
-    # Sort by descending local ID value to avoid partial replacement
-    # (e.g., replacing [1] before [10] would corrupt [10] → [global_1]0).
-    for local_id in sorted(local_to_global.keys(), key=lambda x: -int(x)):
-        global_id = local_to_global[local_id]
-        if local_id != global_id:
-            answer = re.sub(rf'\[{re.escape(local_id)}\]', f'[{global_id}]', answer)
+    # Rewrite inline [N] / [N, M] references to global IDs in a single pass.
+    answer = _remap_citation_groups(answer, local_to_global)
 
-    # --- Step 3: Compute confidence — all inputs clamped to [0,1] ---
-    retrieval_conf = max(0.0, min(1.0, float(state.get("retrieval_confidence", 0.5))))
-    citation_support = min(len(citations) / max(len(chunks), 1), 1.0)
-    confidence = max(0.0, min(1.0, round(
-        llm_score * 0.4 + retrieval_conf * 0.4 + citation_support * 0.2,
-        3,
-    )))
+    # --- Step 3: Grounding-aware confidence + citation calibration ---
+    # An answer is "grounded" only if it cites a sufficiently-relevant chunk OR is
+    # backed by web results — AND is not an information-absence reply. This stops
+    # adversarial "X is not mentioned" answers from carrying high confidence and a
+    # fistful of citations, and keeps confidence honest for ungrounded answers.
+    retrieval_conf = max(0.0, min(1.0, float(state.get("retrieval_confidence", 0.0))))
+    has_web        = bool(state.get("web_search_results"))
+    top_cited      = max((c.relevance_score for c in citations), default=0.0)
+    is_negative    = _is_negative_answer(answer)
+    is_grounded    = (top_cited >= settings.grounding_threshold or has_web) and not is_negative
+
+    if not is_grounded:
+        # Weak / negative / off-topic answer: drop the misleading citations and the
+        # now-dangling inline markers, and report low, honest confidence.
+        citations = []
+        answer = re.sub(r'\s*\[[\d,\s]+\]', '', answer).strip()
+        confidence = round(min(0.25, retrieval_conf), 3)
+    elif has_web and not citations:
+        # Web-grounded answer (no document citations). Base confidence on the LLM's
+        # self-rating with a floor — we DID retrieve live results to ground it.
+        confidence = max(0.0, min(1.0, round(0.45 + llm_score * 0.35, 3)))
+    else:
+        # Document-grounded answer: blend LLM self-rating, retrieval relevance, and
+        # citation coverage.
+        citation_support = min(len(citations) / max(len(chunks), 1), 1.0)
+        confidence = max(0.0, min(1.0, round(
+            llm_score * 0.4 + retrieval_conf * 0.4 + citation_support * 0.2,
+            3,
+        )))
 
     elapsed = time.time() - t0
     logger.info(f"[generator] answer_len={len(answer)} citations={len(citations)} t={elapsed:.2f}s")

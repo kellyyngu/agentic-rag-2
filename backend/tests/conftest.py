@@ -77,6 +77,7 @@ class _Settings:
     gemini_api_key: str = "test-key"
     llm_model: str = "gemini-2.0-flash"
     safe_fail_threshold: float = 0.15
+    grounding_threshold: float = 0.30
     web_search_fallback_threshold: int = 2
     max_reflection_iterations: int = 2
     confidence_threshold: float = 0.7

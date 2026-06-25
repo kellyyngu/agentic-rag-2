@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # Kept conservative so valid low-cosine meta/summary queries are not wrongly refused.
     safe_fail_threshold: float = Field(0.15, env="SAFE_FAIL_THRESHOLD")
 
+    # Grounding gate (generator): a document answer is only "grounded" if its top cited
+    # chunk reaches this cosine relevance. Below it (or a negative "not found" answer),
+    # citations are suppressed and confidence is capped low — no false certainty.
+    grounding_threshold: float = Field(0.30, env="GROUNDING_THRESHOLD")
+
     # Data
     data_dir: str = Field("/app/data", env="DATA_DIR")
 

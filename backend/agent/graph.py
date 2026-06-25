@@ -49,10 +49,24 @@ def _route_after_retrieval(state: AgentState) -> str:
     return "web_search" if low_coverage else "generate"
 
 
+def _route_after_web_search(state: AgentState) -> str:
+    """After a web search: if we have neither web results nor document chunks,
+    there is nothing to ground an answer on → safe_fail with a clear message
+    instead of sending an empty context to the generator (which would refuse
+    with a confusing 'the documents are about X' reply)."""
+    has_web    = bool(state.get("web_search_results"))
+    has_chunks = bool(state.get("retrieved_chunks"))
+    return "generate" if (has_web or has_chunks) else "safe_fail"
+
+
 def _should_continue(state: AgentState) -> str:
     passed    = state.get("reflection_passed", True)
     iteration = state.get("iteration_count", 0)
     if passed or iteration >= settings.max_reflection_iterations:
+        return "end"
+    # A web-grounded answer won't be improved by re-retrieving documents — retrying
+    # would discard the live web result and fall back to stale general knowledge.
+    if state.get("web_search_results"):
         return "end"
     return "retrieve"
 
@@ -86,11 +100,20 @@ def build_graph(retriever_service: Any) -> Any:
 
     async def safe_fail_node(state: AgentState) -> AgentState:
         """Production-safe fallback: weak retrieval + no web → refuse, skip the generator."""
-        msg = (
-            "I couldn't find enough relevant information in the uploaded documents to "
-            "answer this confidently, and no web results were available. Try rephrasing "
-            "the question or adding more detail."
-        )
+        if state.get("intent") == "web_search":
+            # Real-time query but web search produced nothing — usually because
+            # TAVILY_API_KEY isn't configured. Be explicit rather than blaming the docs.
+            msg = (
+                "This looks like a question that needs live web data, but I couldn't "
+                "retrieve any web results. If web search isn't configured, set "
+                "TAVILY_API_KEY to enable real-time answers (weather, news, prices)."
+            )
+        else:
+            msg = (
+                "I couldn't find enough relevant information in the uploaded documents to "
+                "answer this confidently, and no web results were available. Try rephrasing "
+                "the question or adding more detail."
+            )
         state["answer"] = msg
         state["citations"] = []
         state["follow_up_questions"] = []
@@ -142,7 +165,12 @@ def build_graph(retriever_service: Any) -> Any:
         _route_after_retrieval,
         {"direct": "direct", "web_search": "web_search", "generate": "generator"},
     )
-    workflow.add_edge("web_search", "generator")
+    # After web search: ground the answer if we have evidence, else safe_fail
+    workflow.add_conditional_edges(
+        "web_search",
+        _route_after_web_search,
+        {"generate": "generator", "safe_fail": "safe_fail"},
+    )
     workflow.add_edge("generator",  "reflector")
     workflow.add_conditional_edges(
         "reflector",
