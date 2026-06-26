@@ -95,10 +95,12 @@ explicitly with iteration bounds and early-exit conditions.
                               └──────────────┘
 ```
 
-The graph is implemented as a **LangGraph `StateGraph`** with conditional edges. State
-flows through a typed `AgentState` (`backend/agent/state.py`); every node emits
-**Server-Sent Events** so the React frontend renders the agent's decisions (tool calls,
-retrieval quality, reflection verdict) live.
+The graph is implemented as a **LangGraph `StateGraph`** with conditional edges, compiled
+**once at FastAPI startup** (`app.state.graph` in `main.py`) and reused across all requests
+— the topology is static so per-request recompilation would be wasted work. State flows
+through a typed `AgentState` (`backend/agent/state.py`); every node emits **Server-Sent
+Events** so the React frontend renders the agent's decisions (tool calls, retrieval quality,
+reflection verdict) live.
 
 **Key routing functions** (`backend/agent/graph.py`):
 
@@ -176,6 +178,12 @@ is preserved.
 `max_output_tokens` budget and truncate the JSON — disabling them for simple
 classification eliminated a class of intermittent parse failures. The same pattern applies
 to the intent router.
+
+**Event-loop safety:** every blocking Gemini call — orchestrator, reflector, and intent
+router — runs via `await asyncio.to_thread(...)` so no LLM round-trip stalls the async
+event loop. The orchestrator, BM25 search, embedding inference, and Qdrant upsert were
+already off-loop; the reflector and intent router LLM calls were the remaining gaps and are
+now fixed. Under concurrent SSE streams, one slow reflection no longer stalls other users.
 
 ---
 
@@ -405,6 +413,9 @@ some live, some adversarial) and **confident-but-wrong answers are expensive**.
 | Confidence threshold | `confidence_threshold = 0.50` | Calibrated for all-MiniLM-L6-v2 on academic text (0.50–0.65 range); naive 0.70 causes correct answers to be retried and worsened. |
 | Config | All thresholds/iterations in `config.py` (env-overridable) | Operators tune without code changes. |
 | Citations | Per-session manager | Multi-user safe. Session map is bounded by `LRUCache(max_session_cache)` — LRU eviction prevents unbounded growth. |
+| Graph lifecycle | Compiled once at startup | `build_graph()` runs in the FastAPI lifespan; `run_agent()` accepts the compiled graph as an optional param so tests and the eval harness still call `build_graph()` directly without ceremony. |
+| Retrieval confidence | `compute_retrieval_confidence()` in `state.py` | Single source of truth for the top-3 cosine mean used by both the orchestrator and the reflection-retry retriever — eliminates drift between the two paths. |
+| Async LLM calls | `asyncio.to_thread` on all Gemini calls | Reflector and intent router previously blocked the event loop; now all network-bound LLM calls are off-loop, keeping concurrent SSE streams independent. |
 
 ---
 
