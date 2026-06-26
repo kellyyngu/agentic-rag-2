@@ -2,6 +2,18 @@ from typing import TypedDict, List, Optional, Dict, Any
 from dataclasses import dataclass, field
 
 
+def compute_retrieval_confidence(chunks: list) -> float:
+    """Retrieval confidence = mean cosine similarity of the top-3 positive-scoring chunks.
+
+    Single source of truth for the gate consumed by the safe-fail and downgrade
+    routes. Vector cosine (not the reranker logit) is used because reranker scores
+    can be near-zero for valid meta/summary queries. Returns 0.0 when there is no
+    positive-scoring evidence.
+    """
+    top3 = [c.vector_score for c in chunks[:3] if c.vector_score > 0]
+    return sum(top3) / len(top3) if top3 else 0.0
+
+
 @dataclass
 class RetrievedChunk:
     chunk_id: str

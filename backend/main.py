@@ -7,6 +7,7 @@ import sys
 from config import settings
 from api import chat, documents
 from agent.bounded_cache import LRUCache
+from agent.graph import build_graph
 from retrieval.vector_store import VectorStore
 from retrieval.bm25_index import BM25Index
 from retrieval.hybrid_retriever import HybridRetriever
@@ -33,6 +34,9 @@ async def lifespan(app: FastAPI):
         bm25_index=app.state.bm25_index,
         reranker=app.state.reranker,
     )
+    # Compile the LangGraph state machine once — the topology is static, only the
+    # retriever dependency is injected. Avoids recompiling on every chat request.
+    app.state.graph = build_graph(app.state.retriever)
     # Per-session citation registries (session_id → CitationManager).
     # Replaces the old process-global singleton so concurrent users never share
     # or collide on citation IDs. Sessions without an id get a fresh per-request

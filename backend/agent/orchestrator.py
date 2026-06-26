@@ -17,7 +17,7 @@ from google import genai
 from google.genai import types
 from loguru import logger
 
-from agent.state import AgentState, RetrievedChunk
+from agent.state import AgentState, RetrievedChunk, compute_retrieval_confidence
 from config import settings
 
 _client = genai.Client(api_key=settings.gemini_api_key)
@@ -285,8 +285,7 @@ async def run(state: AgentState, retriever_service: Any) -> AgentState:
     ]
 
     if accumulated_chunks:
-        top3 = [c.vector_score for c in accumulated_chunks[:3] if c.vector_score > 0]
-        state["retrieval_confidence"] = sum(top3) / len(top3) if top3 else 0.0
+        state["retrieval_confidence"] = compute_retrieval_confidence(accumulated_chunks)
 
     # Nothing found — downgrade so graph routes to direct_node (LLM answers from knowledge)
     if not accumulated_chunks and not accumulated_web:

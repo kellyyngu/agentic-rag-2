@@ -24,12 +24,12 @@ class ChatRequest(BaseModel):
     debug: bool = False
 
 
-async def _event_stream(query: str, history: list, retriever, citation_manager):
+async def _event_stream(query: str, history: list, retriever, citation_manager, graph=None):
     """Generate SSE events from the agent graph."""
     start = time.time()
 
     try:
-        async for event in run_agent(query, history, retriever, citation_manager):
+        async for event in run_agent(query, history, retriever, citation_manager, graph=graph):
             payload = json.dumps(event["data"])
             yield f"event: {event['event']}\ndata: {payload}\n\n"
     except Exception as e:
@@ -60,8 +60,10 @@ async def chat(request: Request, body: ChatRequest):
     else:
         citation_manager = CitationManager()
 
+    graph = getattr(request.app.state, "graph", None)
+
     return StreamingResponse(
-        _event_stream(body.query, history, retriever, citation_manager),
+        _event_stream(body.query, history, retriever, citation_manager, graph=graph),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

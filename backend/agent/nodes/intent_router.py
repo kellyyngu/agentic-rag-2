@@ -118,7 +118,7 @@ async def run(state: AgentState) -> AgentState:
         intent = "web_search"
         logger.info(f"[router] query='{query}' intent='{intent}' (keyword) t={time.time()-t0:.3f}s")
     else:
-        intent = _classify_with_llm(query, state)
+        intent = await _classify_with_llm(query, state)
 
     elapsed = time.time() - t0
     logger.info(f"[router] query='{query}' intent='{intent}' t={elapsed:.2f}s")
@@ -132,14 +132,17 @@ async def run(state: AgentState) -> AgentState:
     return state
 
 
-def _classify_with_llm(query: str, state: AgentState) -> str:
+async def _classify_with_llm(query: str, state: AgentState) -> str:
     history_text = "\n".join(
         f"{m['role'].upper()}: {m['content']}"
         for m in state.get("conversation_history", [])[-2:]
     ) or "None"
 
     try:
-        response = _client.models.generate_content(
+        # Blocking network call — run off the event loop so the classifier on the
+        # critical path of every query doesn't stall concurrent SSE streams.
+        response = await asyncio.to_thread(
+            _client.models.generate_content,
             model=settings.llm_model,
             contents=ROUTER_PROMPT.format(query=query, history=history_text),
             config=types.GenerateContentConfig(

@@ -193,6 +193,7 @@ async def run_agent(
     conversation_history: list,
     retriever_service: Any,
     citation_manager: Any = None,
+    graph: Any = None,
 ) -> AsyncGenerator[dict, None]:
     queue: asyncio.Queue = asyncio.Queue(maxsize=0)
 
@@ -216,7 +217,10 @@ async def run_agent(
         "citation_manager":    citation_manager,
     }
 
-    graph = build_graph(retriever_service)
+    # Reuse the graph compiled once at startup (see main.py lifespan). Fall back to
+    # building one on demand so direct callers (tests, eval harness) still work.
+    if graph is None:
+        graph = build_graph(retriever_service)
 
     async def run_graph():
         try:

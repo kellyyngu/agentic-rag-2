@@ -3,7 +3,7 @@ import time
 from typing import Any
 from loguru import logger
 
-from agent.state import AgentState, RetrievedChunk
+from agent.state import AgentState, RetrievedChunk, compute_retrieval_confidence
 from config import settings
 
 # If the query explicitly references a document, never reclassify away from document_qa
@@ -59,15 +59,9 @@ async def run(state: AgentState, retriever: Any) -> AgentState:
         "latency_s": elapsed,
     })
 
-    # Compute retrieval confidence from vector cosine similarity (stable [0,1]).
-    # Reranker scores are query-style dependent and can be near-zero for valid
-    # doc-summary queries; vector scores are more reliable for this gate.
-    if top_chunks:
-        top3_vec = [c.vector_score for c in top_chunks[:3] if c.vector_score > 0]
-        retrieval_confidence = sum(top3_vec) / len(top3_vec) if top3_vec else 0.0
-    else:
-        retrieval_confidence = 0.0
-
+    # Retrieval confidence from vector cosine similarity (stable [0,1]) — shared
+    # helper so the orchestrator and this retry path compute it identically.
+    retrieval_confidence = compute_retrieval_confidence(top_chunks)
     state["retrieval_confidence"] = retrieval_confidence
 
     # Confidence gate: if best chunk is below threshold, documents don't cover this query.

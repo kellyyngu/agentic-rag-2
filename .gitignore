@@ -12,3 +12,14 @@ data/
 evaluation/results.json
 .pytest_cache/
 .claude/
+/diagrams
+Agentic_RAG_Presentation.pptx
+build_diagrams.py
+build_slides.py
+PRESENTATION.md
+build_arch_diagram.py
+HANDOVER.md
+architecture_flow_complete.png
+architecture_flow_complete.pptx
+slides_corrected.pptx
+# slides_extracted.txt

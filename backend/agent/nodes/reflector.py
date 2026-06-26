@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from google import genai
@@ -68,7 +69,10 @@ async def run(state: AgentState) -> AgentState:
             confidence=state.get("confidence_score", 0),
         )
         # Force valid JSON via Gemini constrained decoding — no more prose/parse failures.
-        response = _client.models.generate_content(
+        # Blocking network call — run off the event loop so concurrent SSE streams
+        # aren't stalled while reflection waits on Gemini.
+        response = await asyncio.to_thread(
+            _client.models.generate_content,
             model=settings.llm_model,
             contents=prompt,
             config=types.GenerateContentConfig(
