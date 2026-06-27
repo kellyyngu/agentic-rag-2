@@ -472,7 +472,7 @@ npm install && npm run dev                                          # :5173
 Quality assurance is layered across three tiers, and deliberately **not** dependent on a
 single LLM judge.
 
-### 13.1 Unit tests — 219 tests, 9 files
+### 13.1 Unit tests — 212 tests, 8 files
 
 ```
 backend/tests/
@@ -482,7 +482,6 @@ backend/tests/
 ├── test_citations.py    — citation pipeline: CitationManager, _extract_meta (3-tier fallback + truncation),
 │                          _remap_citation_groups, _is_negative_answer (grounding gate),
 │                          _clean_pdf_text (PDF symbol fonts), _evidence_snippet, _keyword_recall
-├── test_trajectories.py — 7 multi-step trajectory tests (see §13.2)
 ├── test_vector_store.py — _point_id() determinism, restart-stability, Qdrant uint63 range
 ├── test_hybrid_async.py — async retrieval correctness, off-loop dispatch, score preservation
 ├── test_confidence.py   — parse_generation, build_citations, calibrate_confidence; config weight respect
