@@ -680,7 +680,7 @@ rag-agentic-2/
 │   │   │   ├── web_search.py       # Tavily integration
 │   │   │   ├── citation_logic.py   # [N] marker parse / remap / grounding gate
 │   │   │   └── evidence.py         # Evidence-snippet selection for citation cards
-│   │   └── tools/              # Tool definitions exposed to the orchestrator
+│   │   └── tools/              # Tool call definitions (retrieve_documents, web_search)
 │   ├── retrieval/
 │   │   ├── hybrid_retriever.py # BM25 + vector → RRF → CrossEncoder rerank
 │   │   ├── bm25_index.py       # Lexical index (rank-bm25), RLock-guarded
@@ -694,8 +694,7 @@ rag-agentic-2/
 │   │   ├── ablation.py         # BM25 vs vector vs hybrid controlled experiment
 │   │   ├── agent_runner.py     # Drives the real compiled graph
 │   │   ├── trace_schema.py     # EvalTrace schema
-│   │   ├── datasets/           # Benchmark questions + ground-truth keywords
-│   │   └── results/            # Reproducible CSV/JSON output
+│   │   └── datasets/           # Benchmark questions + ground-truth keywords
 │   ├── tests/                  # 245 tests (unit · trajectory · safety) + _harness.py
 │   ├── pytest.ini              # Test markers (e.g. `safety`)
 │   ├── requirements.txt
@@ -711,7 +710,6 @@ rag-agentic-2/
 │   ├── vite.config.ts
 │   ├── nginx.conf             # Production static serving
 │   └── Dockerfile
-├── diagrams/                   # Architecture / pipeline figures
 ├── docker-compose.yml          # Qdrant + backend + frontend
 ├── .env.example
 └── README.md
