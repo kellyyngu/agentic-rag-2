@@ -10,6 +10,28 @@ CrossEncoder reranker · Tavily · React + Vite (SSE streaming) · Docker Compos
 
 ---
 
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Problem Statement — why Agentic RAG](#2-problem-statement--why-agentic-rag)
+3. [System Architecture](#3-system-architecture)
+4. [How the Agent Works — think · act · reflect](#4-how-the-agent-works--think--act--reflect)
+5. [Retrieval System — hybrid + reranking](#5-retrieval-system--hybrid--reranking)
+6. [Citation & Grounding System](#6-citation--grounding-system)
+7. [Generator Streaming & Output Guard](#7-generator-streaming--output-guard)
+8. [Web Search Augmentation](#8-web-search-augmentation)
+9. [Evaluation Framework](#9-evaluation-framework)
+10. [Agentic RAG vs Traditional RAG](#10-agentic-rag-vs-traditional-rag)
+11. [System Design Tradeoffs](#11-system-design-tradeoffs)
+12. [Demo / How to Run](#12-demo--how-to-run)
+13. [Testing Strategy — how quality is ensured](#13-testing-strategy--how-quality-is-ensured)
+14. [Limitations & Future Improvements](#14-limitations--future-improvements)
+15. [Repository Layout](#15-repository-layout)
+16. [Tech Stack](#16-tech-stack)
+17. [Conclusion](#17-conclusion)
+
+---
+
 ## 1. Overview
 
 The system answers questions over a corpus of uploaded PDFs (research reports) and
@@ -439,9 +461,9 @@ docker compose up --build
 #    Health   : http://localhost:8000/health
 ```
 
-Upload PDFs through the UI (or `POST /api/documents`); they are chunked, embedded into
-Qdrant, and indexed for BM25. Ask questions in the chat — the UI streams the agent's tool
-calls, retrieved-chunk metadata, the grounded answer with clickable citations, and the
+Upload PDFs through the UI (or `POST /api/documents/upload`); they are chunked, embedded
+into Qdrant, and indexed for BM25. Ask questions in the chat — the UI streams the agent's
+tool calls, retrieved-chunk metadata, the grounded answer with clickable citations, and the
 reflection verdict in real time.
 
 **API (no UI):**
@@ -465,14 +487,42 @@ cd frontend
 npm install && npm run dev                                          # :5173
 ```
 
+### API Reference
+
+All application routes are served under the `/api` prefix; `/health` is the unprefixed
+liveness probe.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness probe (`{"status": "ok"}`) |
+| `POST` | `/api/chat` | Ask a question — **streams** Server-Sent Events (`agent_action`, `chunks`, `token`, `citations`, `reflection`, `done`) |
+| `GET` | `/api/chat/health` | Chat-subsystem readiness check |
+| `POST` | `/api/documents/upload` | Upload a PDF — chunk, embed into Qdrant, index for BM25 |
+| `POST` | `/api/documents/text` | Ingest raw text (same pipeline, no file) |
+| `GET` | `/api/documents/list` | List indexed documents |
+| `GET` | `/api/documents/stats` | Corpus statistics (chunk/document counts) |
+| `DELETE` | `/api/documents` | Clear the corpus |
+
+Interactive OpenAPI docs are available at `http://localhost:8000/docs` when the backend is
+running.
+
 ---
 
 ## 13. Testing Strategy — how quality is ensured
 
-Quality assurance is layered across three tiers, and deliberately **not** dependent on a
-single LLM judge.
+Quality assurance is organised into **four layers** — unit, trajectory, adversarial safety,
+and the evaluation harness — and is deliberately **not** dependent on a single LLM judge.
+The first three layers are fully offline and deterministic: **245 tests collect and run in
+~1 s with zero API cost**.
 
-### 13.1 Unit tests — 212 tests, 8 files
+| Layer | Count | Scope |
+|---|---|---|
+| Unit | 233 | Component & config correctness in isolation |
+| Trajectory | 7 | Real node + routing functions over the graph topology |
+| Safety | 5 | Adversarial contracts under hostile input |
+| Evaluation harness | 40-q benchmark | End-to-end, real LLM (see §9) |
+
+### 13.1 Unit tests — 233 tests, 9 files
 
 ```
 backend/tests/
@@ -485,7 +535,8 @@ backend/tests/
 ├── test_vector_store.py — _point_id() determinism, restart-stability, Qdrant uint63 range
 ├── test_hybrid_async.py — async retrieval correctness, off-loop dispatch, score preservation
 ├── test_confidence.py   — parse_generation, build_citations, calibrate_confidence; config weight respect
-└── test_bounded_cache.py — LRU eviction, recency refresh, thread safety, cap under load
+├── test_bounded_cache.py — LRU eviction, recency refresh, thread safety, cap under load
+└── test_config.py       — config contracts: weight sums (=1.0), threshold ranges [0,1], ordering invariants
 ```
 
 Key coverage areas per file:
@@ -501,10 +552,19 @@ must (not) be in `DIRECT_INTENTS`.
 Includes a regression test for the exchange-rate bug: a web-grounded answer with
 `reflection_passed=False` must not re-trigger document retrieval.
 
-**`test_citations.py`** — 60+ assertions across seven classes: idempotency and thread-safety of
+**`test_citations.py`** — 68 assertions across seven classes: idempotency and thread-safety of
 `CitationManager`, three-tier metadata parser including the truncated-`<<<JSON` regression,
 grouped citation remapping (the `[2, 4]` parser bug), grounding gate detection, PDF glyph
 decoding, evidence snippet keyword scoring, and the `_keyword_recall` eval metric.
+
+**`test_config.py`** — 21 contract tests that validate `config.py` *itself* (not behaviour):
+weights intended to combine must sum to 1.0 (doc confidence weights, web formula ceiling
+≤ 1.0); every probability/cosine threshold must fall in `[0, 1]`; and load-bearing
+**ordering invariants** hold (`safe_fail < grounding < confidence`, `rerank_top_k ≥
+final_top_k`, `chunk_cache_size > bm25_top_k + vector_top_k`). These catch a class of bug
+no behaviour test surfaces: a threshold value that is individually legal but breaks a
+cross-threshold relationship — e.g. raising `safe_fail_threshold` above `grounding_threshold`
+silently makes the grounded-answer path unreachable.
 
 ### 13.2 Trajectory (integration) tests — 7 scenarios
 
@@ -530,7 +590,25 @@ the two things unit tests cannot see.
 **Test teeth:** reintroducing the pre-fix `_should_continue` (without the web-guard) causes
 T5 to raise `AssertionError` immediately — regressions are caught, not just described.
 
-### 13.3 Evaluation harness (`backend/evaluate/`)
+### 13.3 Adversarial safety tests — 5 contracts
+
+`backend/tests/test_safety.py` (marked `pytest.mark.safety`) adds a thin layer of
+adversarial contracts — guarantees the system must hold under hostile input. It implements
+**only the net-new contracts** not already enforced elsewhere, cross-referencing existing
+coverage (e.g. reflection-loop termination in `test_safe_fail.py`, example-based citation
+integrity in `test_citations.py`) so the layer stays the single index of safety guarantees
+without duplicating tests. Fully offline and deterministic; shares builders via
+`tests/_harness.py`.
+
+| Contract | Guarantee under hostile input |
+|---|---|
+| **Injection → safe label** | A coerced classifier output that isn't a real label is clamped to `document_qa` — injection can't mint a new intent or seize a direct-answer path. |
+| **Hallucinated tool name** | If the LLM is coerced into naming a non-existent tool, the orchestrator returns an "unknown tool" observation and terminates cleanly instead of crashing. |
+| **Duplicate-call loop guard** | A repeated `(tool, query)` signature breaks the loop — only the forced first retrieve runs. |
+| **Iteration cap** | A non-stopping LLM (distinct query every turn) is hard-capped at `orchestrator_max_iterations`. |
+| **Citation integrity (fuzzed)** | 200 randomised valid/invalid inline-marker mixes (fixed seed `1234`) — no emitted citation may ever reference a chunk that wasn't retrieved. |
+
+### 13.4 Evaluation harness (`backend/evaluate/`)
 
 Drives the real LangGraph agent over 40 benchmark questions:
 
@@ -542,15 +620,19 @@ Drives the real LangGraph agent over 40 benchmark questions:
 
 ### Why this test architecture
 
-| Tier | What it catches | What it misses |
+| Layer | What it catches | What it misses |
 |---|---|---|
-| Unit | Function-level logic, edge cases, regressions | Multi-node interaction bugs |
+| Unit | Function-level logic, edge cases, regressions, config invariants | Multi-node interaction bugs |
 | Trajectory | Inter-node interaction bugs, routing chains, state propagation | Real LLM behaviour |
+| Safety | Adversarial robustness: injection, loop safety, citation integrity | Real-world attack variety |
 | Evaluation harness | End-to-end correctness with real LLM calls | Slow, non-deterministic, expensive |
 
-The three tiers complement each other: unit tests run in < 1 s and catch 90% of regressions;
-trajectory tests add multi-step path coverage with zero API cost; the eval harness produces
-the numbers you defend in a demo or report.
+Each layer catches what the others structurally cannot. The three offline layers (245 tests:
+unit + trajectory + safety) run in ~1 s with zero API cost and catch the overwhelming
+majority of regressions; the eval harness produces the numbers you defend in a demo or
+report. Crucially, the headline metrics are deterministic — config invariants and keyword
+recall are asserted by exact computation, not by an LLM judge — so results are reproducible
+on every commit.
 
 ---
 
@@ -573,7 +655,71 @@ the numbers you defend in a demo or report.
 
 ---
 
-## 15. Tech Stack
+## 15. Repository Layout
+
+```
+rag-agentic-2/
+├── backend/
+│   ├── main.py                 # FastAPI app: lifespan, service init, graph compiled once
+│   ├── config.py               # All settings/thresholds (Pydantic, env-overridable)
+│   ├── api/
+│   │   ├── chat.py             # POST /api/chat — SSE streaming endpoint
+│   │   └── documents.py        # upload / text / list / stats / delete
+│   ├── agent/
+│   │   ├── graph.py            # LangGraph StateGraph: nodes, conditional edges, run_agent()
+│   │   ├── orchestrator.py     # ReAct tool loop (think · act), forced-first-retrieve, loop guard
+│   │   ├── state.py            # Typed AgentState + compute_retrieval_confidence()
+│   │   ├── citation_manager.py # Per-session stable citation IDs
+│   │   ├── bounded_cache.py    # Thread-safe LRU cache (sessions, chunk cache)
+│   │   ├── nodes/
+│   │   │   ├── intent_router.py    # Classify → document_qa / web_search / direct
+│   │   │   ├── retriever.py        # Reflection-retry retrieval node
+│   │   │   ├── generator.py        # Grounded answer synthesis + SSE sentinel guard
+│   │   │   ├── generator_prompts.py
+│   │   │   ├── reflector.py        # Answer-quality verdict (constrained JSON)
+│   │   │   ├── web_search.py       # Tavily integration
+│   │   │   ├── citation_logic.py   # [N] marker parse / remap / grounding gate
+│   │   │   └── evidence.py         # Evidence-snippet selection for citation cards
+│   │   └── tools/              # Tool definitions exposed to the orchestrator
+│   ├── retrieval/
+│   │   ├── hybrid_retriever.py # BM25 + vector → RRF → CrossEncoder rerank
+│   │   ├── bm25_index.py       # Lexical index (rank-bm25), RLock-guarded
+│   │   ├── vector_store.py     # Qdrant wrapper; SHA-256 stable point IDs
+│   │   ├── reranker.py         # CrossEncoder (ms-marco-MiniLM-L-6-v2)
+│   │   └── document_processor.py  # PDF parse + chunking
+│   ├── evaluate/
+│   │   ├── run_all.py          # Functional + agentic suites
+│   │   ├── functional.py       # Pass/fail behavioural assertions
+│   │   ├── agentic.py          # Trace-derived decision metrics
+│   │   ├── ablation.py         # BM25 vs vector vs hybrid controlled experiment
+│   │   ├── agent_runner.py     # Drives the real compiled graph
+│   │   ├── trace_schema.py     # EvalTrace schema
+│   │   ├── datasets/           # Benchmark questions + ground-truth keywords
+│   │   └── results/            # Reproducible CSV/JSON output
+│   ├── tests/                  # 245 tests (unit · trajectory · safety) + _harness.py
+│   ├── pytest.ini              # Test markers (e.g. `safety`)
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── components/         # Chat, Citations, Layout, UI
+│   │   ├── hooks/              # SSE stream consumption
+│   │   ├── store/             # Zustand state
+│   │   └── types/
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── nginx.conf             # Production static serving
+│   └── Dockerfile
+├── diagrams/                   # Architecture / pipeline figures
+├── docker-compose.yml          # Qdrant + backend + frontend
+├── .env.example
+└── README.md
+```
+
+---
+
+## 16. Tech Stack
 
 - **Frontend:** React 18, Vite, TypeScript, Tailwind CSS, Zustand; SSE streaming UI with a
   live agent-trace panel.
@@ -586,7 +732,7 @@ the numbers you defend in a demo or report.
 
 ---
 
-## 16. Conclusion
+## 17. Conclusion
 
 This project implements Agentic RAG as a **bounded, observable decision system** rather than
 a static retrieval chain: an LLM agent that selects tools, reformulates weak queries,
